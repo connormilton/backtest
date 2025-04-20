@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 # Create logger with detailed formatting
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # Changed from DEBUG to INFO
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.FileHandler("polygon_bot_debug.log"),
@@ -105,16 +105,31 @@ class SMAStrategy(bt.Strategy):
         
         self.log(f'TRADE CLOSED - Profit: {trade.pnl:.2f}, Net: {trade.pnlcomm:.2f}')
         
-        # Add to trade history
-        self.trades.append({
-            'entry_date': trade.dtopen.date().isoformat(),
-            'exit_date': trade.dtclose.date().isoformat(),
-            'entry_price': trade.price,
-            'exit_price': trade.pclose,
-            'size': trade.size,
-            'pnl': trade.pnl,
-            'pnl_pct': (trade.pnl / trade.price) * 100 if trade.price else 0
-        })
+        # Add to trade history - Use string representation for dates
+        try:
+            # If dtopen/dtclose are datetime objects
+            if hasattr(trade.dtopen, 'date'):
+                entry_date = trade.dtopen.date().isoformat()
+            else:
+                # If they're floats, convert to string
+                entry_date = str(trade.dtopen)
+                
+            if hasattr(trade.dtclose, 'date'):
+                exit_date = trade.dtclose.date().isoformat()
+            else:
+                exit_date = str(trade.dtclose)
+                
+            self.trades.append({
+                'entry_date': entry_date,
+                'exit_date': exit_date,
+                'entry_price': trade.price,
+                'exit_price': trade.pclose,
+                'size': trade.size,
+                'pnl': trade.pnl,
+                'pnl_pct': (trade.pnl / trade.price) * 100 if trade.price else 0
+            })
+        except Exception as e:
+            self.log(f"Error recording trade: {e}")
     
     def next(self):
         """Main strategy logic - called for each candle"""
@@ -390,9 +405,31 @@ class TradingBot:
             logger.error("No data available for backtest")
             return None
         
-        # Save data to CSV for Backtrader
+        # Use a better approach with BacktraderCSVData
+        # Create a CSV format that backtrader can directly understand
+        date_format = '%Y-%m-%d'
+        
+        # First create a properly formatted CSV with datetime as the first column
+        data_for_bt = []
+        for idx, row in df.iterrows():
+            date_str = idx.strftime(date_format)
+            data_for_bt.append([
+                date_str,           # Date in YYYY-MM-DD format
+                row['open'],        # Open price
+                row['high'],        # High price
+                row['low'],         # Low price
+                row['close'],       # Close price
+                row['volume']       # Volume
+            ])
+            
+        # Save to CSV with proper headers
         csv_path = f"data/{self.instrument.replace('/', '_')}_{start_date}_{end_date}_{self.granularity}.csv"
-        df.to_csv(csv_path)
+        with open(csv_path, 'w') as f:
+            f.write('datetime,open,high,low,close,volume\n')  # Add header
+            for row in data_for_bt:
+                f.write(','.join(str(item) for item in row) + '\n')
+                
+        logger.info(f"Saved properly formatted data to {csv_path}")
         
         # Create cerebro
         cerebro = bt.Cerebro()
@@ -402,24 +439,25 @@ class TradingBot:
             SMAStrategy, 
             fast_period=self.fast_period, 
             slow_period=self.slow_period,
-            debug=True
+            debug=False  # Changed from True to False to reduce log output
         )
         
         # Set broker parameters
         cerebro.broker.setcash(initial_cash)
         cerebro.broker.setcommission(commission=commission)
         
-        # Add data
+        # Use a clearer CSV data feed configuration
         data = bt.feeds.GenericCSVData(
             dataname=csv_path,
-            dtformat='%Y-%m-%d %H:%M:%S',
-            datetime=0,
-            open=1,
-            high=2,
-            low=3,
-            close=4,
-            volume=5,
-            openinterest=-1,
+            dtformat='%Y-%m-%d',
+            date=0,           # Column 0 is date
+            open=1,           # Column 1 is open
+            high=2,           # Column 2 is high
+            low=3,            # Column 3 is low
+            close=4,          # Column 4 is close
+            volume=5,         # Column 5 is volume
+            openinterest=-1,  # No open interest
+            nullvalue=0.0,    # Replace possible NA values with 0.0
             fromdate=pd.to_datetime(start_date),
             todate=pd.to_datetime(end_date)
         )
