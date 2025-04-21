@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 # Import bot components
 from bot import EURUSDTradingBot
-from backtest_analytics import BacktestAnalytics, enhance_backtester
+# Remove the import for backtest_analytics
 from backtest_engine import Backtester
 
 # Configure logging

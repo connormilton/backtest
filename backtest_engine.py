@@ -13,6 +13,7 @@ import datetime
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import requests  # Ensure requests is imported at the module level
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any, Optional, Tuple, Callable, Union
 from abc import ABC, abstractmethod
@@ -339,14 +340,14 @@ class Strategy(ABC):
         """
         # Default implementation (override in subclasses for custom logic)
         entry_price = data.iloc[signal_row_idx]['close']
+        stop_loss = self.calculate_stop_loss(data, signal_row_idx, direction)
+        
         if direction == "BUY":
             # For buy signals, set take profit at 2:1 risk-reward
-            stop_loss = self.calculate_stop_loss(data, signal_row_idx, direction)
             risk = entry_price - stop_loss
             return entry_price + (risk * 2)
         else:
             # For sell signals, set take profit at 2:1 risk-reward
-            stop_loss = self.calculate_stop_loss(data, signal_row_idx, direction)
             risk = stop_loss - entry_price
             return entry_price - (risk * 2)
     
@@ -367,7 +368,7 @@ class Strategy(ABC):
         risk_amount = account_balance * risk_per_trade
         risk_per_unit = abs(entry_price - stop_loss)
         
-        if risk_per_unit <= 0:
+        if risk_per_unit <= 0.0001:  # Minimum stop distance
             return 0  # Avoid division by zero
             
         position_size = risk_amount / risk_per_unit
@@ -2036,6 +2037,9 @@ class PolygonDataProvider(DataProvider):
     
     def __init__(self, api_key: str, data_dir: str = "backtest_data"):
         """Initialize with API key"""
+        # Ensure requests is imported
+        # import requests  # This should now be available from the top-level import
+        
         self.api_key = api_key
         self.base_url = "https://api.polygon.io"
         self.data_dir = data_dir

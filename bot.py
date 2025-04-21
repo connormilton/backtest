@@ -37,8 +37,8 @@ os.makedirs("logs", exist_ok=True)
 os.makedirs("reports", exist_ok=True)
 os.makedirs("strategies", exist_ok=True)
 
-# API credentials from environment
-OANDA_API_TOKEN = os.getenv("OANDA_API_TOKEN")
+# API credentials from environment - Use alternate variable names like in COINTOSS
+OANDA_API_TOKEN = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_API_TOKEN")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 OANDA_PRACTICE = os.getenv("OANDA_PRACTICE", "True").lower() in ["true", "1", "yes"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -372,9 +372,10 @@ class OandaDataProvider(DataProvider):
         """Initialize OANDA data provider"""
         self.api_token = api_token
         self.account_id = account_id
-        self.base_url = "https://api-fxpractice.oanda.com" if practice else "https://api-fxtrade.oanda.com"
+        # Update to use /v3 in the URL as seen in COINTOSS example
+        self.base_url = "https://api-fxpractice.oanda.com/v3" if practice else "https://api-fxtrade.oanda.com/v3"
         
-        # Set headers for all requests
+        # Set headers for all requests - Add space after Bearer as in COINTOSS
         self.headers = {
             "Authorization": f"Bearer {self.api_token}",
             "Content-Type": "application/json"
@@ -462,8 +463,8 @@ class OandaDataProvider(DataProvider):
         
         # First try to get data from OANDA API
         try:
-            # Build API endpoint
-            endpoint = f"{self.base_url}/v3/instruments/{oanda_instrument}/candles"
+            # Build API endpoint - Path already has /v3
+            endpoint = f"{self.base_url}/instruments/{oanda_instrument}/candles"
             
             params = {
                 "count": count,
@@ -527,7 +528,8 @@ class OandaDataProvider(DataProvider):
     def get_instruments(self) -> List[str]:
         """Get list of available instruments"""
         try:
-            endpoint = f"{self.base_url}/v3/accounts/{self.account_id}/instruments"
+            # Update path to include /v3
+            endpoint = f"{self.base_url}/accounts/{self.account_id}/instruments"
             
             response = self.session.get(endpoint)
             response.raise_for_status()
@@ -561,8 +563,8 @@ class OandaDataProvider(DataProvider):
         oanda_timeframe = self._parse_timeframe(timeframe)
         
         try:
-            # Build API endpoint
-            endpoint = f"{self.base_url}/v3/instruments/{oanda_instrument}/candles"
+            # Build API endpoint - Path already has /v3
+            endpoint = f"{self.base_url}/instruments/{oanda_instrument}/candles"
             
             params = {
                 "count": count,
@@ -612,12 +614,13 @@ class OandaClient:
     
     def __init__(self):
         """Initialize OANDA API client"""
+        # Use requests module imported at the top level
         self.session = requests.Session()
         
-        # Set base URL based on account type
-        self.base_url = "https://api-fxpractice.oanda.com" if OANDA_PRACTICE else "https://api-fxtrade.oanda.com"
+        # Set base URL based on account type - Update to use /v3 in path
+        self.base_url = "https://api-fxpractice.oanda.com/v3" if OANDA_PRACTICE else "https://api-fxtrade.oanda.com/v3"
         
-        # Set headers for all requests
+        # Set headers for all requests - Add space after Bearer as in COINTOSS example
         self.headers = {
             "Authorization": f"Bearer {OANDA_API_TOKEN}",
             "Content-Type": "application/json"
@@ -635,7 +638,8 @@ class OandaClient:
     def get_account(self):
         """Get account information"""
         try:
-            response = self.session.get(f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/summary")
+            # Update path to match /v3 format
+            response = self.session.get(f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/summary")
             response.raise_for_status()
             return response.json().get("account", {})
         except Exception as e:
@@ -660,8 +664,9 @@ class OandaClient:
                 "granularity": granularity,
                 "price": "M"
             }
+            # Update path for /v3
             response = self.session.get(
-                f"{self.base_url}/v3/instruments/EUR_USD/candles", 
+                f"{self.base_url}/instruments/EUR_USD/candles", 
                 params=params
             )
             response.raise_for_status()
@@ -908,7 +913,8 @@ class OandaClient:
     def get_open_positions(self):
         """Get open positions"""
         try:
-            response = self.session.get(f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/openPositions")
+            # Update path to include /v3
+            response = self.session.get(f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/openPositions")
             response.raise_for_status()
             return response.json().get("positions", [])
         except Exception as e:
@@ -958,8 +964,10 @@ class OandaClient:
             
             # Execute the order
             logger.info(f"Executing {direction} order for EUR_USD with {units} units")
+            
+            # Update path for /v3
             response = self.session.post(
-                f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/orders",
+                f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/orders",
                 json=order_data
             )
             
@@ -997,8 +1005,9 @@ class OandaClient:
         """Update stop loss for EUR/USD position"""
         try:
             # Get open trades for EUR_USD
+            # Update path for /v3
             response = self.session.get(
-                f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/trades?instrument=EUR_USD&state=OPEN"
+                f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/trades?instrument=EUR_USD&state=OPEN"
             )
             response.raise_for_status()
             trades = response.json().get("trades", [])
@@ -1018,8 +1027,9 @@ class OandaClient:
                 }
                 
                 try:
+                    # Update path for /v3
                     update_response = self.session.put(
-                        f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_id}/orders",
+                        f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_id}/orders",
                         json=update_data
                     )
                     update_response.raise_for_status()
@@ -1037,8 +1047,9 @@ class OandaClient:
     def close_position(self, position_id):
         """Close a specific position"""
         try:
+            # Update path for /v3
             response = self.session.put(
-                f"{self.base_url}/v3/accounts/{OANDA_ACCOUNT_ID}/positions/EUR_USD/close",
+                f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/positions/EUR_USD/close",
                 json={"longUnits": "ALL"}  # This will close all long positions
             )
             response.raise_for_status()

@@ -11,6 +11,7 @@ import datetime
 import pandas as pd
 import numpy as np
 import openai
+import requests
 from typing import Dict, List, Any, Optional, Tuple, Union
 
 # Configure logging
@@ -397,3 +398,607 @@ Your memory and self-improvement:
 - Adapt your approach based on recent performance
 - Evolve your strategies over time for better results
 - Create and backtest new strategies before deployment
+"""
+        
+    def analyze_market(self, price_data, account_data, positions, market_data=None):
+        """Analyze market data and generate trading signals"""
+        try:
+            # Default response if analysis fails
+            default_action = {"action": "WAIT", "reason": "Analysis failed or insufficient data"}
+            
+            if price_data.empty:
+                logger.warning("Empty price data provided for analysis")
+                return default_action
+            
+            # Prepare memory metrics
+            memory_stats = {
+                "balance": account_data.get("balance", 0),
+                "currency": "USD",
+                "safety_level": self.memory.memory.get("safety_level", 0.01),
+                "daily_profit_pct": account_data.get("daily_profit_pct", 0),
+                "win_rate": (self.memory.memory.get("win_count", 0) / self.memory.memory.get("trade_count", 1)) * 100 if self.memory.memory.get("trade_count", 0) > 0 else 0,
+                "win_count": self.memory.memory.get("win_count", 0),
+                "trade_count": self.memory.memory.get("trade_count", 0)
+            }
+            
+            # Get recent trades
+            recent_trades = self.memory.get_recent_trades(5)
+            
+            # Format recent trades for prompt
+            recent_trades_formatted = []
+            for trade in recent_trades:
+                trade_str = f"Direction: {trade.get('direction', 'Unknown')}, "
+                trade_str += f"Entry: {trade.get('entry_price', 'Unknown')}, "
+                trade_str += f"Exit: {trade.get('exit_price', 'Unknown') if trade.get('exit_price') else 'Open'}, "
+                trade_str += f"Result: {'Win' if trade.get('is_win') else 'Loss' if trade.get('is_loss') else 'Unknown/Open'}, "
+                trade_str += f"Reasoning: {trade.get('reasoning', 'None provided')[:100]}..."
+                recent_trades_formatted.append(trade_str)
+            
+            # Format open positions
+            open_positions = "None" if not positions else ", ".join([
+                f"ID: {p.get('id', 'Unknown')}, Direction: {'BUY' if int(p.get('long', {}).get('units', 0)) > 0 else 'SELL'}, "
+                f"Units: {abs(int(p.get('long', {}).get('units', 0)) or int(p.get('short', {}).get('units', 0)))}, "
+                f"Unrealized P&L: {p.get('unrealizedPL', 'Unknown')}"
+                for p in positions if p.get('instrument') == 'EUR_USD'
+            ])
+            
+            # Format price data (just a sample)
+            price_sample = price_data.tail(5).to_string()
+            
+            # Format market data
+            technical_data = "Not available"
+            if market_data and "technical_indicators" in market_data:
+                technical_data = str(market_data["technical_indicators"])
+            
+            multi_tf_data = "Not available"
+            if market_data and "multi_timeframe" in market_data:
+                multi_tf_data = "Available across timeframes"
+            
+            intermarket_data = "Not available"
+            if market_data and "intermarket" in market_data:
+                intermarket_data = str(market_data["intermarket"])
+            
+            econ_data = "Not available"
+            if market_data and "economic" in market_data:
+                econ_data = str(market_data["economic"])
+            
+            sentiment_data = "Not available"
+            if market_data and "sentiment" in market_data:
+                sentiment_data = str(market_data["sentiment"])
+            
+            # Get saved strategies
+            strategies = self.memory.get_saved_strategies(3)
+            strategy_info = "None" if not strategies else ", ".join([f"{s.get('name', 'Unknown')}" for s in strategies])
+            
+            # Create prompt with all available data
+            from prompts import MARKET_ANALYSIS_PROMPT
+            prompt = MARKET_ANALYSIS_PROMPT.format(
+                balance=memory_stats["balance"],
+                currency=memory_stats["currency"],
+                safety_level=memory_stats["safety_level"],
+                daily_profit_pct=memory_stats["daily_profit_pct"],
+                win_rate=memory_stats["win_rate"],
+                win_count=memory_stats["win_count"],
+                trade_count=memory_stats["trade_count"],
+                open_positions=open_positions,
+                price_data=price_sample,
+                technical_indicators=technical_data,
+                multi_timeframe_data=multi_tf_data,
+                intermarket_data=intermarket_data,
+                economic_data=econ_data,
+                sentiment_data=sentiment_data,
+                recent_trades="\n".join(recent_trades_formatted),
+                strategy_info=strategy_info,
+                strategy_weights=str(self.memory.memory.get("strategy_weights", {}))
+            )
+            
+            # Call OpenAI API
+            response = openai.ChatCompletion.create(
+                model="gpt-4-turbo-preview",  # Use appropriate model
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            # Parse response
+            decision_text = response.choices[0].message.content
+            
+            # Try to parse as JSON
+            try:
+                import json
+                # Find JSON part by looking for the first '{' and last '}'
+                json_start = decision_text.find('{')
+                json_end = decision_text.rfind('}') + 1
+                
+                if json_start != -1 and json_end != -1:
+                    # Extract the JSON string
+                    json_str = decision_text[json_start:json_end]
+                    # Strip any leading/trailing whitespace
+                    json_str = json_str.strip()
+                    
+                    # Try to parse the JSON
+                    try:
+                        decision_json = json.loads(json_str)
+                    except json.JSONDecodeError as e:
+                        # If that fails, try to fix common JSON formatting issues
+                        logger.warning(f"Initial JSON parsing failed: {e}")
+                        # Sometimes LLMs add trailing commas or miss quotes - try to clean it up
+                        # This is a very basic cleanup - you might need more sophisticated handling
+                        json_str = json_str.replace(",\n}", "\n}")  # Fix trailing commas
+                        json_str = json_str.replace(",\n  }", "\n  }")
+                        decision_json = json.loads(json_str)
+                    
+                    # Extract the action field or set default
+                    action = decision_json.get("action", "WAIT")
+                    if not action:
+                        action = "WAIT"
+                    
+                    # Ensure action is in the result
+                    decision_json["action"] = action
+                    
+                    # Add raw LLM response for debugging
+                    decision_json["raw_llm_response"] = decision_text
+                    
+                    return decision_json
+                else:
+                    logger.warning("No JSON found in LLM response")
+                    return {"action": "WAIT", "reason": "Invalid response format", "raw_llm_response": decision_text}
+                    
+            except Exception as e:
+                logger.error(f"Error parsing LLM response: {e}")
+                # If JSON parsing fails, look for key action words in the text
+                decision_text_lower = decision_text.lower()
+                
+                if "buy" in decision_text_lower and "sell" not in decision_text_lower:
+                    action = "OPEN"
+                    direction = "BUY"
+                elif "sell" in decision_text_lower and "buy" not in decision_text_lower:
+                    action = "OPEN"
+                    direction = "SELL"
+                else:
+                    action = "WAIT"
+                    direction = None
+                
+                return {
+                    "action": action, 
+                    "trade_details": {"direction": direction} if direction else {},
+                    "reason": f"Error parsing response: {str(e)}", 
+                    "raw_llm_response": decision_text
+                }
+                
+        except Exception as e:
+            logger.error(f"Error analyzing market: {e}")
+            return {"action": "WAIT", "reason": f"Analysis error: {str(e)}"}
+    
+    def validate_trade(self, trade_details, price_data, validation_period=10):
+        """Validate a trade through backtesting before execution"""
+        try:
+            # Extract strategy details
+            strategy_type = trade_details.get("strategy", "trend_following")
+            direction = trade_details.get("direction", "BUY").upper()
+            entry_price = float(trade_details.get("entry_price", 0))
+            stop_loss = float(trade_details.get("stop_loss", 0))
+            risk_percent = float(trade_details.get("risk_percent", 2.0)) if trade_details.get("risk_percent") else 2.0
+            
+            # Default validation result
+            valid = False
+            confidence = 0.0
+            reason = "Failed validation checks"
+            
+            # Basic validation checks
+            if entry_price <= 0 or stop_loss <= 0:
+                return {"valid": False, "confidence": 0.0, "reason": "Invalid prices"}
+                
+            if risk_percent <= 0 or risk_percent > 5:
+                return {"valid": False, "confidence": 0.0, "reason": "Invalid risk percentage"}
+                
+            # Calculate risk-reward ratio
+            take_profit_levels = trade_details.get("take_profit", [])
+            if not take_profit_levels:
+                return {"valid": False, "confidence": 0.0, "reason": "No take profit levels provided"}
+                
+            # Use first take profit level for calculation
+            first_tp = float(take_profit_levels[0]) if isinstance(take_profit_levels, list) else float(take_profit_levels)
+            
+            # Calculate risk and reward
+            if direction == "BUY":
+                risk = entry_price - stop_loss
+                reward = first_tp - entry_price
+            else:  # SELL
+                risk = stop_loss - entry_price
+                reward = entry_price - first_tp
+            
+            # Validate risk-reward ratio
+            risk_reward_ratio = reward / risk if risk > 0 else 0
+            if risk_reward_ratio < 1.5:
+                return {"valid": False, "confidence": 0.0, "reason": f"Poor risk-reward ratio: {risk_reward_ratio:.2f}"}
+                
+            # Load or create strategy for backtest
+            strategy = None
+            from bot import MIN_CONFIDENCE_THRESHOLD
+            
+            try:
+                # Check if there's a matching saved strategy
+                saved_strategies = self.memory.get_saved_strategies()
+                for saved in saved_strategies:
+                    if saved.get("name", "").lower().startswith(strategy_type.lower()):
+                        strategy = self.memory.load_strategy(strategy_name=saved.get("name"))
+                        break
+                
+                # Create a simple strategy for validation if none found
+                if not strategy:
+                    strategy = self._create_validation_strategy(strategy_type, entry_price, stop_loss, direction)
+            
+                # Run backtests to validate the strategy
+                end_date = datetime.datetime.now()
+                start_date = end_date - datetime.timedelta(days=validation_period)
+                
+                # Run backtest
+                result = self.backtester.run_backtest(
+                    strategy=strategy,
+                    instrument="EUR/USD",
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeframe="H1",
+                    initial_balance=10000.0,
+                    risk_per_trade=risk_percent / 100
+                )
+                
+                if result:
+                    # Calculate confidence score based on backtest metrics
+                    win_rate_factor = min(1.0, result.win_rate / 60) if result.win_rate > 0 else 0
+                    profit_factor_factor = min(1.0, result.profit_factor / 1.5) if result.profit_factor > 0 else 0
+                    sharpe_factor = min(1.0, result.sharpe_ratio / 1.0) if result.sharpe_ratio > 0 else 0
+                    total_return_factor = min(1.0, result.total_return_pct / 5) if result.total_return_pct > 0 else 0
+                    drawdown_factor = min(1.0, (30 - result.max_drawdown_pct) / 30) if result.max_drawdown_pct < 30 else 0
+                    
+                    # Calculate combined confidence (weighted average)
+                    confidence = (
+                        (win_rate_factor * 0.3) +
+                        (profit_factor_factor * 0.2) +
+                        (sharpe_factor * 0.2) +
+                        (total_return_factor * 0.2) +
+                        (drawdown_factor * 0.1)
+                    )
+                    
+                    # Decide validity based on confidence threshold
+                    valid = confidence >= MIN_CONFIDENCE_THRESHOLD
+                    
+                    if valid:
+                        reason = f"Backtest validated with {confidence:.2f} confidence"
+                    else:
+                        reason = (
+                            f"Confidence {confidence:.2f} below threshold {MIN_CONFIDENCE_THRESHOLD}. "
+                            f"Win rate: {result.win_rate:.1f}%, Profit factor: {result.profit_factor:.2f}, "
+                            f"Sharpe: {result.sharpe_ratio:.2f}, Drawdown: {result.max_drawdown_pct:.2f}%"
+                        )
+                
+            except Exception as e:
+                logger.error(f"Error during backtest validation: {e}")
+                reason = f"Backtest error: {str(e)}"
+            
+            return {
+                "valid": valid,
+                "confidence": confidence,
+                "reason": reason
+            }
+            
+        except Exception as e:
+            logger.error(f"Error validating trade: {e}")
+            return {"valid": False, "confidence": 0.0, "reason": f"Validation error: {str(e)}"}
+    
+    def validate_strategy(self, strategy_details, price_data, risk_level=0.02, validation_period=30):
+        """Validate a newly created strategy through backtesting"""
+        try:
+            # Extract strategy details
+            name = strategy_details.get("name", "LLM Generated Strategy")
+            description = strategy_details.get("description", "")
+            parameters = strategy_details.get("parameters", {})
+            code = strategy_details.get("code", "")
+            
+            # Create strategy
+            strategy = LLMGeneratedStrategy(
+                name=name,
+                parameters=parameters,
+                strategy_code=code
+            )
+            
+            # Run backtest validation
+            end_date = datetime.datetime.now()
+            start_date = end_date - datetime.timedelta(days=validation_period)
+            
+            result = self.backtester.run_backtest(
+                strategy=strategy,
+                instrument="EUR/USD",
+                start_date=start_date,
+                end_date=end_date,
+                timeframe="H1",
+                initial_balance=10000.0,
+                risk_per_trade=risk_level
+            )
+            
+            if not result:
+                return {"valid": False, "reason": "Strategy couldn't be backtested"}
+            
+            # Define validation criteria
+            valid = (
+                result.win_rate >= 50 and
+                result.profit_factor >= 1.2 and
+                result.sharpe_ratio >= 0.8 and
+                result.max_drawdown_pct <= 20
+            )
+            
+            if valid:
+                # Save the strategy if valid
+                self.memory.log_strategy(strategy)
+                
+                return {
+                    "valid": True,
+                    "reason": f"Strategy validated successfully with win rate {result.win_rate:.1f}%, profit factor {result.profit_factor:.2f}",
+                    "metrics": {
+                        "win_rate": result.win_rate,
+                        "profit_factor": result.profit_factor,
+                        "sharpe_ratio": result.sharpe_ratio,
+                        "max_drawdown_pct": result.max_drawdown_pct,
+                        "total_return_pct": result.total_return_pct
+                    }
+                }
+            else:
+                return {
+                    "valid": False,
+                    "reason": (
+                        f"Strategy failed validation with win rate {result.win_rate:.1f}%, "
+                        f"profit factor {result.profit_factor:.2f}, sharpe {result.sharpe_ratio:.2f}, "
+                        f"drawdown {result.max_drawdown_pct:.2f}%"
+                    ),
+                    "metrics": {
+                        "win_rate": result.win_rate,
+                        "profit_factor": result.profit_factor,
+                        "sharpe_ratio": result.sharpe_ratio,
+                        "max_drawdown_pct": result.max_drawdown_pct,
+                        "total_return_pct": result.total_return_pct
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"Error validating strategy: {e}")
+            return {"valid": False, "reason": f"Validation error: {str(e)}"}
+    
+    def _create_validation_strategy(self, strategy_type, entry_price, stop_loss, direction):
+        """Create a simple strategy for trade validation"""
+        if strategy_type.lower() == "trend_following":
+            strategy_code = """
+def generate_signals(self, data):
+    if data.empty:
+        return data
+    
+    df = data.copy()
+    
+    # Calculate EMAs
+    df['ema_fast'] = df['close'].ewm(span=10, adjust=False).mean()
+    df['ema_slow'] = df['close'].ewm(span=30, adjust=False).mean()
+    
+    # Initialize signal column
+    df['signal'] = 0
+    
+    # Generate signals based on direction for validation
+    direction = self.parameters.get('direction', 'BUY')
+    entry_price = self.parameters.get('entry_price', 0)
+    
+    if direction == 'BUY':
+        # Buy when price crosses entry and EMA10 > EMA30
+        buy_condition = (df['close'] >= entry_price) & (df['ema_fast'] > df['ema_slow'])
+        df.loc[buy_condition, 'signal'] = 1
+    else:
+        # Sell when price crosses entry and EMA10 < EMA30
+        sell_condition = (df['close'] <= entry_price) & (df['ema_fast'] < df['ema_slow'])
+        df.loc[sell_condition, 'signal'] = -1
+    
+    return df
+"""
+        elif strategy_type.lower() == "breakout":
+            strategy_code = """
+def generate_signals(self, data):
+    if data.empty:
+        return data
+    
+    df = data.copy()
+    
+    # Calculate Bollinger Bands
+    window = 20
+    df['middle_band'] = df['close'].rolling(window=window).mean()
+    df['std'] = df['close'].rolling(window=window).std()
+    df['upper_band'] = df['middle_band'] + (df['std'] * 2)
+    df['lower_band'] = df['middle_band'] - (df['std'] * 2)
+    
+    # Initialize signal column
+    df['signal'] = 0
+    
+    # Generate signals based on direction for validation
+    direction = self.parameters.get('direction', 'BUY')
+    entry_price = self.parameters.get('entry_price', 0)
+    
+    if direction == 'BUY':
+        # Buy when price breaks above upper band
+        buy_condition = (df['close'] >= entry_price) & (df['close'] > df['upper_band'])
+        df.loc[buy_condition, 'signal'] = 1
+    else:
+        # Sell when price breaks below lower band
+        sell_condition = (df['close'] <= entry_price) & (df['close'] < df['lower_band'])
+        df.loc[sell_condition, 'signal'] = -1
+    
+    return df
+"""
+        else:  # Default to mean_reversion
+            strategy_code = """
+def generate_signals(self, data):
+    if data.empty:
+        return data
+    
+    df = data.copy()
+    
+    # Calculate RSI
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # Initialize signal column
+    df['signal'] = 0
+    
+    # Generate signals based on direction for validation
+    direction = self.parameters.get('direction', 'BUY')
+    entry_price = self.parameters.get('entry_price', 0)
+    
+    if direction == 'BUY':
+        # Buy when RSI is below 30 (oversold) and price at entry
+        buy_condition = (df['close'] >= entry_price) & (df['rsi'] < 30)
+        df.loc[buy_condition, 'signal'] = 1
+    else:
+        # Sell when RSI is above 70 (overbought) and price at entry
+        sell_condition = (df['close'] <= entry_price) & (df['rsi'] > 70)
+        df.loc[sell_condition, 'signal'] = -1
+    
+    return df
+"""
+        
+        # Create strategy with proper parameters
+        strategy = LLMGeneratedStrategy(
+            name=f"Validation_{strategy_type}",
+            parameters={
+                "direction": direction,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss
+            },
+            strategy_code=strategy_code
+        )
+        
+        return strategy
+    
+    def review_and_evolve(self, account_status):
+        """Periodically review performance and evolve strategies and prompts"""
+        try:
+            # Get memory metrics
+            memory_stats = {
+                "balance": account_status.get("balance", 0),
+                "currency": "USD",
+                "safety_level": self.memory.memory.get("safety_level", 0.01),
+                "daily_profit_pct": account_status.get("daily_profit_pct", 0),
+                "win_rate": (self.memory.memory.get("win_count", 0) / self.memory.memory.get("trade_count", 1)) * 100 if self.memory.memory.get("trade_count", 0) > 0 else 0,
+                "win_count": self.memory.memory.get("win_count", 0),
+                "trade_count": self.memory.memory.get("trade_count", 0),
+                "strategy_weights": self.memory.memory.get("strategy_weights", {})
+            }
+            
+            # Get recent trades
+            recent_trades = self.memory.get_recent_trades(20)
+            
+            # Format recent trades for prompt
+            recent_trades_formatted = []
+            for trade in recent_trades:
+                trade_str = f"Direction: {trade.get('direction', 'Unknown')}, "
+                trade_str += f"Entry: {trade.get('entry_price', 'Unknown')}, "
+                trade_str += f"Exit: {trade.get('exit_price', 'Unknown') if trade.get('exit_price') else 'Open'}, "
+                trade_str += f"Result: {'Win' if trade.get('is_win') else 'Loss' if trade.get('is_loss') else 'Unknown/Open'}, "
+                trade_str += f"Strategy: {trade.get('strategy', 'Unknown')}, "
+                trade_str += f"Reasoning: {trade.get('reasoning', 'None provided')[:100]}..."
+                recent_trades_formatted.append(trade_str)
+            
+            # Get saved strategies
+            saved_strategies = self.memory.get_saved_strategies()
+            
+            # Format saved strategies
+            saved_strategies_formatted = []
+            for strategy in saved_strategies:
+                strategy_str = f"Name: {strategy.get('name', 'Unknown')}, "
+                strategy_str += f"Created: {strategy.get('timestamp', 'Unknown')}, "
+                strategy_str += f"Parameters: {strategy.get('parameters', {})}"
+                saved_strategies_formatted.append(strategy_str)
+            
+            # Create review prompt
+            from prompts import SYSTEM_REVIEW_PROMPT
+            prompt = SYSTEM_REVIEW_PROMPT.format(
+                balance=memory_stats["balance"],
+                currency="USD",
+                daily_profit_pct=memory_stats["daily_profit_pct"],
+                win_rate=memory_stats["win_rate"],
+                win_count=memory_stats["win_count"],
+                trade_count=memory_stats["trade_count"],
+                safety_level=memory_stats["safety_level"],
+                strategy_weights=memory_stats["strategy_weights"],
+                system_prompt=self.system_prompt,
+                recent_trades="\n".join(recent_trades_formatted),
+                saved_strategies="\n".join(saved_strategies_formatted)
+            )
+            
+            # Call OpenAI API for review
+            response = openai.ChatCompletion.create(
+                model="gpt-4-turbo-preview",  # Use appropriate model
+                messages=[
+                    {"role": "system", "content": "You are an AI that specializes in reviewing and improving forex trading systems."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            # Parse response
+            review_text = response.choices[0].message.content
+            
+            # Try to parse as JSON
+            try:
+                import json
+                # Find JSON part
+                json_start = review_text.find('{')
+                json_end = review_text.rfind('}') + 1
+                
+                if json_start != -1 and json_end != -1:
+                    json_str = review_text[json_start:json_end]
+                    json_str = json_str.strip()
+                    
+                    try:
+                        review_json = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        # Try to clean up common JSON formatting issues
+                        json_str = json_str.replace(",\n}", "\n}")  # Fix trailing commas
+                        json_str = json_str.replace(",\n  }", "\n  }")
+                        review_json = json.loads(json_str)
+                    
+                    # Process strategy weights
+                    if "strategy_weights" in review_json:
+                        self.memory.memory["strategy_weights"] = review_json["strategy_weights"]
+                    
+                    # Process improved prompt
+                    if "improved_prompt" in review_json:
+                        new_prompt = review_json["improved_prompt"]
+                        
+                        # Log the prompt update
+                        self.memory.log_review({
+                            "prompt_version": new_prompt,
+                            "reason": review_json.get("reasoning", "Periodic system review"),
+                            "performance_analysis": review_json.get("performance_analysis", "")
+                        })
+                        
+                        # Update the system prompt
+                        self.system_prompt = new_prompt
+                    
+                    # Add raw response for reference
+                    review_json["raw_review_text"] = review_text
+                    
+                    return review_json
+                    
+                else:
+                    logger.warning("No JSON found in review response")
+                    return {"error": "Invalid review format", "raw_review_text": review_text}
+                    
+            except Exception as e:
+                logger.error(f"Error parsing review response: {e}")
+                return {"error": f"Parsing error: {str(e)}", "raw_review_text": review_text}
+                
+        except Exception as e:
+            logger.error(f"Error during system review: {e}")
+            return {"error": f"Review error: {str(e)}"}
