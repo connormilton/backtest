@@ -68,27 +68,28 @@ def main():
                 # Check if daily target or max drawdown reached
                 if account_status["target_reached"]:
                     logger.info(f"Daily target of {account_status['daily_profit_pct']:.2f}% reached. Pausing trading.")
-                    time.sleep(300)  # Wait 5 minutes before checking again
+                    time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                     
                 if account_status["max_drawdown_reached"]:
                     logger.warning(f"Maximum daily drawdown of {account_status['daily_drawdown']:.2f}% reached. Pausing trading.")
-                    time.sleep(300)  # Wait 5 minutes before checking again
+                    time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                 
                 # Get current positions
                 positions = trading_bot.oanda_client.get_open_positions()
                 
-                # Get current price data for multiple timeframes
-                market_data = {}
+                # Get H1 data for main analysis first
+                price_data = trading_bot.oanda_client.get_eur_usd_data(count=100, granularity="H1")
                 
                 # Get additional market data if available
+                market_data = {}
                 try:
                     # Add multiple timeframes if available
                     market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
                     
-                    # Add technical indicators if method exists
-                    if hasattr(trading_bot.oanda_client, 'get_technical_indicators'):
+                    # Add technical indicators if method exists and price data is available
+                    if hasattr(trading_bot.oanda_client, 'get_technical_indicators') and not price_data.empty:
                         tech_indicators = trading_bot.oanda_client.get_technical_indicators(price_data)
                         market_data["technical_indicators"] = tech_indicators
                         
@@ -105,9 +106,6 @@ def main():
                         market_data["sentiment"] = trading_bot.oanda_client.get_market_sentiment()
                 except Exception as e:
                     logger.warning(f"Error collecting additional market data: {e}")
-                
-                # Get H1 data for main analysis
-                price_data = trading_bot.oanda_client.get_eur_usd_data(count=100, granularity="H1")
                 
                 # If we have no price data, wait and try again
                 if price_data.empty:
@@ -152,9 +150,22 @@ def main():
                     review_result = trading_bot.brain.review_and_evolve(account_status)
                     logger.info(f"System review completed: {review_result.get('performance_analysis', '')[:100]}...")
                 
-                # Wait before next cycle
-                logger.info("Waiting for next cycle...")
-                time.sleep(300)  # 5 minute cycle
+                # Determine appropriate wait time based on conditions
+                if account_status["target_reached"] or account_status["max_drawdown_reached"]:
+                    # Longer wait time when targets/limits reached
+                    wait_time = 600  # 10 minutes
+                elif now.hour < 7 or now.hour > 20:
+                    # Longer interval outside main trading hours (assuming London hours)
+                    wait_time = 900  # 15 minutes
+                elif decision.get("action") != "WAIT" and decision.get("action") in ["OPEN", "UPDATE"]:
+                    # Shorter interval after taking action
+                    wait_time = 180  # 3 minutes
+                else:
+                    # Default wait time
+                    wait_time = 300  # 5 minutes
+
+                logger.info(f"Waiting {wait_time} seconds until next cycle...")
+                time.sleep(wait_time)
                 
             except KeyboardInterrupt:
                 logger.info("Manual interruption detected. Exiting...")
@@ -162,8 +173,13 @@ def main():
                 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
-                logger.info("Waiting 60 seconds before retrying...")
-                time.sleep(60)
+                # Check if it's a connection error and sleep longer
+                if "Connection" in str(e) or "10054" in str(e):
+                    logger.info("Connection error detected. Waiting 5 minutes before retrying...")
+                    time.sleep(300)  # 5 minutes
+                else:
+                    logger.info("Waiting 60 seconds before retrying...")
+                    time.sleep(60)
     
     except Exception as e:
         logger.error(f"Fatal error: {e}")

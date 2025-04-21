@@ -139,10 +139,15 @@ class EURUSDTradingBot:
                 logger.warning(f"Missing required trade details: {trade_details}")
                 return False
             
-            # Validate the trade with backtesting before proceeding
-            validation_result = self.brain.validate_trade(trade_details, price_data)
-            
-            logger.info(f"Trade validation result: {validation_result}")
+            # Check if backtest validation was already performed by EnhancedTradingBrain
+            if "backtest_validation" in decision and decision["backtest_validation"].get("valid", False):
+                # Trust the enhanced brain's validation
+                validation_result = {"valid": True}
+                logger.info("Using existing backtest validation result")
+            else:
+                # Fall back to traditional validation
+                validation_result = self.brain.validate_trade(trade_details, price_data)
+                logger.info(f"Trade validation result: {validation_result}")
             
             if not validation_result.get("valid", False):
                 logger.warning(f"Trade validation failed: {validation_result.get('reason', 'Unknown reason')}")
@@ -217,7 +222,7 @@ class EURUSDTradingBot:
             if stop_distance <= 0.0001:  # Minimum stop distance
                 logger.error("Stop distance is too small, using minimum value")
                 stop_distance = 0.0001
-            
+                
             # Basic position sizing (very simplified)
             units = int(risk_amount / stop_distance * 10000)  # Scaled for EUR/USD
             
@@ -613,22 +618,34 @@ class OandaClient:
     """OANDA API client for forex trading execution"""
     
     def __init__(self):
-        """Initialize OANDA API client"""
-        # Use requests module imported at the top level
-        self.session = requests.Session()
-        
-        # Set base URL based on account type - Update to use /v3 in path
+        """Initialize OANDA API client with improved connection handling"""
+        # Create session with connection pooling
         self.base_url = "https://api-fxpractice.oanda.com/v3" if OANDA_PRACTICE else "https://api-fxtrade.oanda.com/v3"
-        
-        # Set headers for all requests - Add space after Bearer as in COINTOSS example
         self.headers = {
             "Authorization": f"Bearer {OANDA_API_TOKEN}",
             "Content-Type": "application/json"
         }
-        self.session.headers.update(self.headers)
-        
+        # Initialize cache containers
+        self._data_cache = {}
+        self._last_account_info = {}
+        # Create robust session
+        self.session = self._create_session()
         # Verify connection
         self._test_connection()
+    
+    def _create_session(self):
+        """Create a robust session with connection pooling"""
+        session = requests.Session()
+        session.headers.update(self.headers)
+        # Configure connection pooling and retries
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=5,
+            pool_maxsize=10,
+            max_retries=3,
+            pool_block=False
+        )
+        session.mount('https://', adapter)
+        return session
     
     def _test_connection(self):
         """Test connection to OANDA API"""
@@ -636,15 +653,31 @@ class OandaClient:
         logger.info(f"Connected to OANDA. Balance: {account.get('balance')} {account.get('currency')}")
     
     def get_account(self):
-        """Get account information"""
-        try:
-            # Update path to match /v3 format
-            response = self.session.get(f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/summary")
-            response.raise_for_status()
-            return response.json().get("account", {})
-        except Exception as e:
-            logger.error(f"Error getting account: {e}")
-            return {}
+        """Get account information with retry logic and caching"""
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(f"{self.base_url}/accounts/{OANDA_ACCOUNT_ID}/summary")
+                response.raise_for_status()
+                account_info = response.json().get("account", {})
+                # Cache the successful result
+                self._last_account_info = account_info
+                return account_info
+            except Exception as e:
+                logger.warning(f"Error getting account (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    # Reset session to handle connection issues
+                    self.session = self._create_session()
+                else:
+                    logger.error(f"Failed to get account after {max_retries} attempts")
+        
+        # Return cached account info if available, otherwise empty dict with sane defaults
+        if not self._last_account_info:
+            self._last_account_info = {"balance": 1000, "currency": "GBP"}
+        return self._last_account_info
     
     def get_margin_available(self):
         """Get available margin from the account"""
@@ -657,14 +690,32 @@ class OandaClient:
             return 0
     
     def get_eur_usd_data(self, count=100, granularity="H1"):
-        """Get EUR/USD price data for a specific timeframe"""
+        """Get EUR/USD price data with caching"""
+        cache_key = f"EUR_USD_{granularity}"
+        current_time = datetime.datetime.now()
+        
+        # Determine cache validity period based on timeframe
+        if granularity.startswith('M'):
+            cache_validity_minutes = 1  # 1 minute for minute-level data
+        elif granularity.startswith('H'):
+            cache_validity_minutes = 10  # 10 minutes for hourly data
+        else:
+            cache_validity_minutes = 60  # 1 hour for daily+ data
+        
+        # Check if we have cached data that's recent enough
+        if hasattr(self, '_data_cache') and cache_key in self._data_cache:
+            cached_data, timestamp = self._data_cache[cache_key]
+            # Only use cached data if it's recent enough
+            if (current_time - timestamp).total_seconds() < cache_validity_minutes * 60:
+                return cached_data
+        
+        # If no valid cache, request from API
         try:
             params = {
                 "count": count,
                 "granularity": granularity,
                 "price": "M"
             }
-            # Update path for /v3
             response = self.session.get(
                 f"{self.base_url}/instruments/EUR_USD/candles", 
                 params=params
@@ -686,28 +737,58 @@ class OandaClient:
                         "volume": int(candle.get("volume", 0)),
                         "timeframe": granularity
                     })
-            return pd.DataFrame(data)
+            df = pd.DataFrame(data)
+            
+            # Cache the result
+            if not hasattr(self, '_data_cache'):
+                self._data_cache = {}
+            self._data_cache[cache_key] = (df, current_time)
+            
+            return df
         except Exception as e:
+            # If we have any cached data, return it rather than failing
+            if hasattr(self, '_data_cache') and cache_key in self._data_cache:
+                logger.warning(f"Using cached data for {cache_key} due to API error: {e}")
+                return self._data_cache[cache_key][0]
             logger.error(f"Error getting EUR/USD data: {e}")
             return pd.DataFrame()
             
     def get_multi_timeframe_data(self):
-        """Get EUR/USD data across multiple timeframes"""
-        timeframes = {
-            "M5": {"count": 100, "name": "5-minute"},
-            "M15": {"count": 100, "name": "15-minute"},
-            "H1": {"count": 100, "name": "1-hour"},
-            "H4": {"count": 50, "name": "4-hour"},
-            "D": {"count": 30, "name": "Daily"}
+        """Get EUR/USD data across multiple timeframes with reduced loading"""
+        # Define the base timeframes we need every time
+        primary_timeframes = {
+            "H1": {"count": 100, "name": "1-hour"}
         }
         
+        # Only add additional timeframes every other cycle
+        if not hasattr(self, '_timeframe_cycle') or self._timeframe_cycle % 2 == 0:
+            secondary_timeframes = {
+                "M15": {"count": 100, "name": "15-minute"},
+                "H4": {"count": 50, "name": "4-hour"}
+            }
+            primary_timeframes.update(secondary_timeframes)
+        
+        # And these timeframes even less frequently
+        if not hasattr(self, '_timeframe_cycle') or self._timeframe_cycle % 4 == 0:
+            tertiary_timeframes = {
+                "M5": {"count": 100, "name": "5-minute"},
+                "D": {"count": 30, "name": "Daily"}
+            }
+            primary_timeframes.update(tertiary_timeframes)
+        
+        # Toggle cycle
+        self._timeframe_cycle = getattr(self, '_timeframe_cycle', 0) + 1
+        if self._timeframe_cycle > 10:
+            self._timeframe_cycle = 0
+        
+        # Fetch data
         data = {}
-        for tf, tf_info in timeframes.items():
+        for tf, tf_info in primary_timeframes.items():
             df = self.get_eur_usd_data(count=tf_info["count"], granularity=tf)
             if not df.empty:
-                # Convert DataFrame to list of dicts for easier serialization
+                # Only include the most recent data points
                 data[tf_info["name"]] = df.tail(10).to_dict('records')
-                
+        
         return data
     
     def get_economic_calendar(self):

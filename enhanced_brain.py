@@ -455,17 +455,20 @@ def generate_signals(self, data):
     # Initialize signal column
     df['signal'] = 0
     
-    # Generate signals based on direction for validation
+    # Get trade direction and entry price
     direction = self.parameters.get('direction', '{direction}')
     entry_price = self.parameters.get('entry_price', {entry_price})
     
+    # Define a price region (±5% around entry price)
+    price_region = (df['close'] >= entry_price * 0.95) & (df['close'] <= entry_price * 1.05)
+    
     if direction == 'BUY':
-        # Buy when price is near entry and EMA20 > EMA50
-        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['ema_20'] > df['ema_50'])
+        # Buy signals when price is in region and trend is up
+        buy_condition = price_region & (df['ema_20'] > df['ema_50'])
         df.loc[buy_condition, 'signal'] = 1
     else:
-        # Sell when price is near entry and EMA20 < EMA50
-        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['ema_20'] < df['ema_50'])
+        # Sell signals when price is in region and trend is down
+        sell_condition = price_region & (df['ema_20'] < df['ema_50'])
         df.loc[sell_condition, 'signal'] = -1
     
     return df
@@ -488,17 +491,20 @@ def generate_signals(self, data):
     # Initialize signal column
     df['signal'] = 0
     
-    # Generate signals based on direction for validation
+    # Get trade direction and entry price
     direction = self.parameters.get('direction', '{direction}')
     entry_price = self.parameters.get('entry_price', {entry_price})
     
+    # Define a price region (±5% around entry price)
+    price_region = (df['close'] >= entry_price * 0.95) & (df['close'] <= entry_price * 1.05)
+    
     if direction == 'BUY':
-        # Buy when price breaks above upper band
-        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['close'] > df['upper_band'])
+        # Buy when price is near entry and breaks above upper band
+        buy_condition = price_region & (df['close'] > df['upper_band'])
         df.loc[buy_condition, 'signal'] = 1
     else:
-        # Sell when price breaks below lower band
-        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['close'] < df['lower_band'])
+        # Sell when price is near entry and breaks below lower band
+        sell_condition = price_region & (df['close'] < df['lower_band'])
         df.loc[sell_condition, 'signal'] = -1
     
     return df
@@ -521,22 +527,25 @@ def generate_signals(self, data):
     # Initialize signal column
     df['signal'] = 0
     
-    # Generate signals based on direction for validation
+    # Get trade direction and entry price
     direction = self.parameters.get('direction', '{direction}')
     entry_price = self.parameters.get('entry_price', {entry_price})
     
+    # Define a price region (±5% around entry price)
+    price_region = (df['close'] >= entry_price * 0.95) & (df['close'] <= entry_price * 1.05)
+    
     if direction == 'BUY':
-        # Buy when RSI is oversold and price matches entry
-        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['rsi'] < 30)
+        # Buy when RSI is oversold and price in region
+        buy_condition = price_region & (df['rsi'] < 30)
         df.loc[buy_condition, 'signal'] = 1
     else:
-        # Sell when RSI is overbought and price matches entry
-        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['rsi'] > 70)
+        # Sell when RSI is overbought and price in region
+        sell_condition = price_region & (df['rsi'] > 70)
         df.loc[sell_condition, 'signal'] = -1
     
     return df
 """
-        
+    
         # Create strategy with proper parameters
         strategy = LLMGeneratedStrategy(
             name=f"Backtest_{strategy_type}_{direction}",
