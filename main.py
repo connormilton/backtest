@@ -2,6 +2,7 @@
 """
 Main entry point for the LLM-powered Forex Trading Bot
 Updated to use Enhanced Trading Brain with backtesting integration
+Includes updated risk parameters: max 2% total exposure, max 1% per trade
 """
 
 import os
@@ -47,10 +48,6 @@ def main():
         # Create trading bot
         trading_bot = EURUSDTradingBot()
         
-        # Make sure the bot has the error tracking attribute
-        if not hasattr(trading_bot, 'last_error'):
-            trading_bot.last_error = None
-        
         # Replace the brain with the enhanced version
         trading_bot.brain = EnhancedTradingBrain(trading_bot.memory, trading_bot.backtester)
         logger.info("Enhanced trading brain initialized with backtesting integration")
@@ -70,32 +67,23 @@ def main():
                            f"Daily P&L={account_status['daily_profit_pct']:.2f}%, " +
                            f"Drawdown={account_status['daily_drawdown']:.2f}%")
                 
+                # Check current exposure
+                current_exposure = trading_bot.calculate_current_exposure()
+                logger.info(f"Current exposure: {current_exposure:.2f}% of account balance")
+                
                 # Check if daily target or max drawdown reached
-                if account_status.get("target_reached", False):
+                if account_status["target_reached"]:
                     logger.info(f"Daily target of {account_status['daily_profit_pct']:.2f}% reached. Pausing trading.")
                     time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                     
-                if account_status.get("max_drawdown_reached", False):
+                if account_status["max_drawdown_reached"]:
                     logger.warning(f"Maximum daily drawdown of {account_status['daily_drawdown']:.2f}% reached. Pausing trading.")
                     time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                 
                 # Get current positions
                 positions = trading_bot.oanda_client.get_open_positions()
-                
-                # Calculate current exposure as percentage of account balance
-                current_exposure = 0.0
-                if positions:
-                    eur_usd_positions = [p for p in positions if p.get('instrument') == 'EUR_USD']
-                    for position in eur_usd_positions:
-                        # Get position value - could be in long or short
-                        units = abs(int(position.get('long', {}).get('units', 0)) or int(position.get('short', {}).get('units', 0)))
-                        avg_price = float(position.get('long', {}).get('averagePrice', 0) or position.get('short', {}).get('averagePrice', 0))
-                        position_value = units * avg_price
-                        current_exposure += (position_value / account_status['balance']) * 100
-                
-                logger.info(f"Current exposure: {current_exposure:.2f}% of account balance")
                 
                 # Get H1 data for main analysis first
                 price_data = trading_bot.oanda_client.get_eur_usd_data(count=100, granularity="H1")
@@ -104,8 +92,7 @@ def main():
                 market_data = {}
                 try:
                     # Add multiple timeframes if available
-                    if hasattr(trading_bot.oanda_client, 'get_multi_timeframe_data'):
-                        market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
+                    market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
                     
                     # Add technical indicators if method exists and price data is available
                     if hasattr(trading_bot.oanda_client, 'get_technical_indicators') and not price_data.empty:
@@ -155,36 +142,33 @@ def main():
                                    f"Profit Factor: {metrics.get('profit_factor', 0):.2f}, " +
                                    f"Sharpe: {metrics.get('sharpe_ratio', 0):.2f}")
                 
-                # Execute decision with improved error handling
-                if decision.get("action", "WAIT") != "WAIT":
-                    # Validate decision based on current position state
-                    has_positions = len([p for p in positions if p.get('instrument') == 'EUR_USD']) > 0
+                # Check for risk compliance before executing decision
+                if decision.get("action") == "OPEN":
+                    trade_details = decision.get("trade_details", {})
+                    risk_percent = trade_details.get("risk_percent", 1.0)
                     
-                    # Logical validation for UPDATE and CLOSE actions
-                    if decision.get("action") in ["UPDATE", "CLOSE"] and not has_positions:
-                        logger.warning(f"Cannot {decision.get('action')} when no position exists. Skipping execution.")
-                        trading_bot.last_error = f"Cannot {decision.get('action')} when no position exists"
-                    # Logical validation for OPEN action
-                    elif decision.get("action") == "OPEN" and has_positions:
-                        logger.warning("Cannot OPEN when position already exists. Skipping execution.")
-                        trading_bot.last_error = "Cannot OPEN when position already exists"
+                    # Ensure risk percent is a number and capped at 1%
+                    if isinstance(risk_percent, str):
+                        risk_percent = float(''.join(c for c in risk_percent if c.isdigit() or c == '.'))
+                    risk_percent = min(1.0, float(risk_percent))
+                    
+                    # Update the risk parameter to ensure 1% max
+                    trade_details["risk_percent"] = risk_percent
+                    logger.info(f"Risk parameter capped at {risk_percent:.2f}%")
+                    
+                    # Check if new trade would exceed total exposure limit
+                    if current_exposure + risk_percent > 2.0:
+                        logger.warning(f"Trade rejected - would exceed 2% total risk limit: current {current_exposure:.2f}% + new {risk_percent:.2f}%")
+                        decision["action"] = "WAIT"
+                        decision["reason"] = f"Exceeded maximum total exposure of 2% (current: {current_exposure:.2f}%)"
+                
+                # Execute decision
+                if decision.get("action") != "WAIT":
+                    result = trading_bot.execute_decision(decision, price_data)
+                    if result:
+                        logger.info(f"Successfully executed {decision.get('action')} action")
                     else:
-                        # Proceed with execution if validation passes
-                        result = False
-                        
-                        # Check if the bot has an execute_decision method
-                        if hasattr(trading_bot, 'execute_decision'):
-                            result = trading_bot.execute_decision(decision, price_data)
-                        else:
-                            logger.error("Trading bot doesn't have execute_decision method")
-                            trading_bot.last_error = "Missing execute_decision method in trading bot"
-                        
-                        if result:
-                            logger.info(f"Successfully executed {decision.get('action')} action")
-                        else:
-                            # Get more detailed error information
-                            error_reason = getattr(trading_bot, 'last_error', 'Unknown reason')
-                            logger.warning(f"Failed to execute {decision.get('action')} action: {error_reason}")
+                        logger.warning(f"Failed to execute {decision.get('action')} action")
                 
                 # Review and evolve periodically (once per day)
                 if now.hour == 0 and now.minute < 5:  # Around midnight
@@ -193,7 +177,7 @@ def main():
                     logger.info(f"System review completed: {review_result.get('performance_analysis', '')[:100]}...")
                 
                 # Determine appropriate wait time based on conditions
-                if account_status.get("target_reached", False) or account_status.get("max_drawdown_reached", False):
+                if account_status["target_reached"] or account_status["max_drawdown_reached"]:
                     # Longer wait time when targets/limits reached
                     wait_time = 600  # 10 minutes
                 elif now.hour < 7 or now.hour > 20:

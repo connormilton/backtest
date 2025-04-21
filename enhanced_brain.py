@@ -38,10 +38,6 @@ class EnhancedTradingBrain:
         
         # Use the enhanced system prompt
         self.system_prompt = ENHANCED_SYSTEM_PROMPT
-        
-        # Add risk management parameters
-        self.max_total_risk_percent = 1.0  # Maximum 1% total risk
-        self.max_open_positions = 1  # Only allow one position at a time
     
     def analyze_market(self, price_data, account_data, positions, market_data=None):
         """Analyze market data and generate trading signals with comprehensive reasoning"""
@@ -57,17 +53,15 @@ class EnhancedTradingBrain:
             memory_stats = {
                 "balance": account_data.get("balance", 0),
                 "currency": "USD",
-                "safety_level": self.memory.memory.get("safety_level", 0.01) if hasattr(self.memory, "memory") else 0.01,
+                "safety_level": self.memory.memory.get("safety_level", 0.01),
                 "daily_profit_pct": account_data.get("daily_profit_pct", 0),
-                "win_rate": (self.memory.memory.get("win_count", 0) / self.memory.memory.get("trade_count", 1)) * 100 if hasattr(self.memory, "memory") and self.memory.memory.get("trade_count", 0) > 0 else 0,
-                "win_count": self.memory.memory.get("win_count", 0) if hasattr(self.memory, "memory") else 0,
-                "trade_count": self.memory.memory.get("trade_count", 0) if hasattr(self.memory, "memory") else 0
+                "win_rate": (self.memory.memory.get("win_count", 0) / self.memory.memory.get("trade_count", 1)) * 100 if self.memory.memory.get("trade_count", 0) > 0 else 0,
+                "win_count": self.memory.memory.get("win_count", 0),
+                "trade_count": self.memory.memory.get("trade_count", 0)
             }
             
             # Get recent trades
-            recent_trades = []
-            if hasattr(self.memory, "get_recent_trades"):
-                recent_trades = self.memory.get_recent_trades(5)
+            recent_trades = self.memory.get_recent_trades(5)
             
             # Format recent trades for prompt
             recent_trades_formatted = []
@@ -79,22 +73,13 @@ class EnhancedTradingBrain:
                 trade_str += f"Reasoning: {trade.get('reasoning', 'None provided')[:100]}..."
                 recent_trades_formatted.append(trade_str)
             
-            # Check for existing EUR_USD positions
-            eur_usd_positions = [p for p in positions if p.get('instrument') == 'EUR_USD']
-            has_existing_position = len(eur_usd_positions) > 0
-            
-            # Format open positions with explicit position status
-            position_status = "POSITIONS: OPEN - " if has_existing_position else "POSITIONS: NONE - "
-            if not positions or not has_existing_position:
-                open_positions = position_status + "No open EUR/USD positions"
-            else:
-                position_details = ", ".join([
-                    f"ID: {p.get('id', 'Unknown')}, Direction: {'BUY' if int(p.get('long', {}).get('units', 0)) > 0 else 'SELL'}, "
-                    f"Units: {abs(int(p.get('long', {}).get('units', 0)) or int(p.get('short', {}).get('units', 0)))}, "
-                    f"Unrealized P&L: {p.get('unrealizedPL', 'Unknown')}"
-                    for p in positions if p.get('instrument') == 'EUR_USD'
-                ])
-                open_positions = position_status + position_details
+            # Format open positions
+            open_positions = "None" if not positions else ", ".join([
+                f"ID: {p.get('id', 'Unknown')}, Direction: {'BUY' if int(p.get('long', {}).get('units', 0)) > 0 else 'SELL'}, "
+                f"Units: {abs(int(p.get('long', {}).get('units', 0)) or int(p.get('short', {}).get('units', 0)))}, "
+                f"Unrealized P&L: {p.get('unrealizedPL', 'Unknown')}"
+                for p in positions if p.get('instrument') == 'EUR_USD'
+            ])
             
             # Prepare price data summary - just include most recent candles
             price_sample = price_data.tail(10).to_string()
@@ -130,37 +115,8 @@ Volume: {price_data['volume'].iloc[-1]}
                 sentiment_data = str(market_data["sentiment"])
             
             # Get saved strategies
-            strategies = []
-            if hasattr(self.memory, "get_saved_strategies"):
-                strategies = self.memory.get_saved_strategies(3)
+            strategies = self.memory.get_saved_strategies(3)
             strategy_info = "None" if not strategies else ", ".join([f"{s.get('name', 'Unknown')}" for s in strategies])
-            
-            # Add risk management guidance to the prompt
-            risk_management_note = f"""
-IMPORTANT RISK MANAGEMENT CONSTRAINTS:
-- Maximum total account risk: {self.max_total_risk_percent}%
-- Maximum open positions: {self.max_open_positions} (currently: {len(eur_usd_positions)})
-"""
-            if has_existing_position:
-                risk_management_note += """
-IMPORTANT: You ARE CURRENTLY MANAGING AN EXISTING POSITION. Your options are:
-1. WAIT - Continue to monitor the position without changes
-2. UPDATE - Adjust the stop loss or take profit levels
-3. CLOSE - Close the position if conditions warrant
-DO NOT suggest opening a new position until the existing one is closed.
-"""
-            else:
-                risk_management_note += """
-IMPORTANT: You DO NOT have any open positions currently. Your options are:
-1. WAIT - If market conditions don't warrant a trade
-2. OPEN - Open a new position if a high-conviction setup exists (ensure risk <= 1% of account)
-UPDATE and CLOSE actions are NOT VALID when no position exists.
-"""
-            
-            # Get strategy weights (if they exist)
-            strategy_weights = {}
-            if hasattr(self.memory, "memory") and "strategy_weights" in self.memory.memory:
-                strategy_weights = self.memory.memory.get("strategy_weights", {})
             
             # Create prompt with enhanced format
             prompt = ENHANCED_MARKET_ANALYSIS_PROMPT.format(
@@ -179,11 +135,8 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
                 sentiment_data=sentiment_data,
                 recent_trades="\n".join(recent_trades_formatted),
                 strategy_info=strategy_info,
-                strategy_weights=str(strategy_weights)
+                strategy_weights=str(self.memory.memory.get("strategy_weights", {}))
             )
-            
-            # Add risk management note to the prompt
-            prompt = prompt + "\n\n" + risk_management_note
             
             # Call OpenAI API using direct client
             try:
@@ -222,11 +175,8 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
                     if not action:
                         action = "WAIT"
                     
-                    # Apply risk management constraints
-                    decision_json = self._apply_risk_management(decision_json, has_existing_position, account_data)
-                    
                     # Ensure action is in the result
-                    decision_json["action"] = decision_json.get("action", "WAIT")
+                    decision_json["action"] = action
                     
                     # Include the analysis part of the response (non-JSON part)
                     # This captures the detailed reasoning before the JSON structure
@@ -236,7 +186,7 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
                         decision_json["detailed_analysis"] = detailed_analysis
                     
                     # If the action is OPEN, run backtesting validation
-                    if decision_json["action"] == "OPEN" and "trade_details" in decision_json:
+                    if action == "OPEN" and "trade_details" in decision_json:
                         logger.info("Validating trade through backtesting...")
                         
                         # Extract backtesting parameters from the response
@@ -274,37 +224,16 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
                             decision_json["action"] = "WAIT"
                             decision_json["reason"] = f"Backtest validation failed: {backtest_result.get('reason')}"
                     
-                    logger.info(f"Final decision action: {decision_json.get('action')}")
                     return decision_json
                 else:
                     logger.warning("Failed to extract JSON from response")
                     # If JSON extraction fails, use fallback parsing
-                    
-                    # Apply position management constraints even to fallback parsing
-                    if has_existing_position and ("BUY" in decision_text or "SELL" in decision_text):
-                        logger.warning("Preventing new position when one already exists")
-                        return {
-                            "action": "WAIT", 
-                            "reason": "Already have an open position. Cannot open another until existing position is closed.",
-                            "detailed_analysis": decision_text[:1000]
-                        }
-                    
-                    # Ensure we don't try to update or close when no position exists
-                    if not has_existing_position and ("UPDATE" in decision_text or "CLOSE" in decision_text):
-                        logger.warning("Preventing update/close when no position exists")
-                        return {
-                            "action": "WAIT", 
-                            "reason": "No open position to update or close.",
-                            "detailed_analysis": decision_text[:1000]
-                        }
-                    
                     if "BUY" in decision_text:
                         return {
                             "action": "OPEN",
                             "trade_details": {
                                 "direction": "BUY",
-                                "reasoning": "Extracted from non-JSON response",
-                                "risk_percent": self.max_total_risk_percent  # Enforce max risk
+                                "reasoning": "Extracted from non-JSON response"
                             },
                             "detailed_analysis": decision_text[:1000]  # Include full text as analysis
                         }
@@ -313,8 +242,7 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
                             "action": "OPEN", 
                             "trade_details": {
                                 "direction": "SELL",
-                                "reasoning": "Extracted from non-JSON response",
-                                "risk_percent": self.max_total_risk_percent  # Enforce max risk
+                                "reasoning": "Extracted from non-JSON response"
                             },
                             "detailed_analysis": decision_text[:1000]
                         }
@@ -332,51 +260,6 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
         except Exception as e:
             logger.error(f"Error analyzing market: {e}")
             return {"action": "WAIT", "reason": f"Analysis error: {str(e)}"}
-    
-    def _apply_risk_management(self, decision, has_existing_position, account_data):
-        """Apply risk management constraints to the decision"""
-        action = decision.get("action", "WAIT")
-        
-        # Check for logical conflicts in action vs. position state
-        if not has_existing_position and action in ["UPDATE", "CLOSE"]:
-            # Can't update or close non-existent positions
-            logger.warning(f"Action {action} not valid with no open positions. Changing to WAIT.")
-            decision["action"] = "WAIT"
-            decision["reason"] = f"Cannot {action.lower()} a position that doesn't exist"
-            return decision
-        
-        # Check if we already have a position
-        if has_existing_position and action == "OPEN":
-            # Change action to WAIT if trying to open a new position when one exists
-            logger.warning("Already have an open position. Changing action from OPEN to WAIT.")
-            decision["action"] = "WAIT"
-            decision["reason"] = "Already have an open position. Cannot open another until existing position is closed."
-            return decision
-        
-        # Enforce maximum risk for OPEN actions
-        if action == "OPEN" and "trade_details" in decision:
-            # Get the risk percentage from the decision
-            risk_percent = decision["trade_details"].get("risk_percent", 0)
-            
-            # Try to convert to float if it's a string
-            if isinstance(risk_percent, str):
-                try:
-                    risk_percent = float(risk_percent.replace('%', ''))
-                except:
-                    risk_percent = 0
-            
-            # If risk is higher than max allowed, cap it
-            if risk_percent > self.max_total_risk_percent:
-                logger.warning(f"Reducing risk from {risk_percent}% to {self.max_total_risk_percent}%")
-                decision["trade_details"]["risk_percent"] = self.max_total_risk_percent
-                decision["trade_details"]["original_risk_percent"] = risk_percent
-            
-            # If risk is too low or invalid, set it to the maximum allowed
-            if risk_percent <= 0:
-                logger.warning(f"Invalid risk {risk_percent}%. Setting to {self.max_total_risk_percent}%")
-                decision["trade_details"]["risk_percent"] = self.max_total_risk_percent
-        
-        return decision
     
     def _calculate_indicators(self, data):
         """Calculate technical indicators for price data"""
@@ -477,25 +360,9 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
             else:
                 take_profit = float(take_profit_levels) if take_profit_levels else 0
             
-            risk_percent = float(trade_details.get("risk_percent", self.max_total_risk_percent))
+            # ENFORCE MAXIMUM 1% RISK PER TRADE for backtesting validation
+            risk_percent = min(1.0, float(trade_details.get("risk_percent", 1.0)))
             strategy_type = trade_details.get("strategy", "trend_following")
-            
-            # Validate that stop loss is not too close to entry
-            current_price = price_data['close'].iloc[-1]
-            min_stop_distance = current_price * 0.001  # Min 0.1% distance
-            
-            if direction == "BUY" and entry_price - stop_loss < min_stop_distance:
-                return {
-                    "valid": False,
-                    "reason": "Stop loss too close to entry price",
-                    "metrics": {}
-                }
-            elif direction == "SELL" and stop_loss - entry_price < min_stop_distance:
-                return {
-                    "valid": False,
-                    "reason": "Stop loss too close to entry price",
-                    "metrics": {}
-                }
             
             # Create appropriate strategy for backtesting based on the strategy type
             strategy = self._create_strategy_for_backtest(
@@ -571,30 +438,7 @@ UPDATE and CLOSE actions are NOT VALID when no position exists.
     
     def _create_strategy_for_backtest(self, strategy_type, direction, entry_price, stop_loss, take_profit):
         """Create appropriate strategy for backtesting based on the trade parameters"""
-        try:
-            # Try to import from your brain module - adjust this import to match your project structure
-            from brain import LLMGeneratedStrategy
-        except ImportError:
-            # If that fails, create a simplified class definition
-            class LLMGeneratedStrategy:
-                def __init__(self, name, parameters, strategy_code=None):
-                    self.name = name
-                    self.parameters = parameters
-                    self.strategy_code = strategy_code
-                    
-                def generate_signals(self, data):
-                    df = data.copy()
-                    df['signal'] = 0
-                    
-                    direction = self.parameters.get('direction', 'BUY')
-                    entry_price = self.parameters.get('entry_price', 0)
-                    
-                    if direction == 'BUY':
-                        df.loc[df['close'] < entry_price, 'signal'] = 1
-                    else:
-                        df.loc[df['close'] > entry_price, 'signal'] = -1
-                        
-                    return df
+        from brain import LLMGeneratedStrategy
         
         # Define strategy code based on the strategy type
         if strategy_type.lower() == "trend_following":
@@ -726,15 +570,17 @@ def generate_signals(self, data):
             direction = trade_details.get("direction", "BUY").upper()
             entry_price = float(trade_details.get("entry_price", 0))
             stop_loss = float(trade_details.get("stop_loss", 0))
-            risk_percent = float(trade_details.get("risk_percent", self.max_total_risk_percent)) if trade_details.get("risk_percent") else self.max_total_risk_percent
+            risk_percent = float(trade_details.get("risk_percent", 2.0)) if trade_details.get("risk_percent") else 2.0
+            
+            # Enforce maximum 1% risk per trade
+            risk_percent = min(1.0, risk_percent)
             
             # Basic validation checks
             if entry_price <= 0 or stop_loss <= 0:
                 return {"valid": False, "confidence": 0.0, "reason": "Invalid prices"}
                 
-            if risk_percent <= 0 or risk_percent > 5:
-                # Cap risk at our maximum
-                risk_percent = min(risk_percent, self.max_total_risk_percent)
+            if risk_percent <= 0 or risk_percent > 1.0:
+                return {"valid": False, "confidence": 0.0, "reason": "Invalid risk percentage"}
                 
             # Calculate risk-reward ratio
             take_profit_levels = trade_details.get("take_profit", [])
@@ -789,9 +635,7 @@ def generate_signals(self, data):
             logger.info("Reviewing trading performance and evolving strategies...")
             
             # Get recent trades
-            recent_trades = []
-            if hasattr(self.memory, "get_recent_trades"):
-                recent_trades = self.memory.get_recent_trades(10)
+            recent_trades = self.memory.get_recent_trades(10)
             
             # Calculate basic performance metrics
             win_count = sum(1 for trade in recent_trades if trade.get("is_win", False))
@@ -801,15 +645,10 @@ def generate_signals(self, data):
             # Log the performance review
             logger.info(f"Recent performance: {win_rate:.1%} win rate ({win_count}/{total_count})")
             
-            # Get strategy weights
-            strategy_weights = {}
-            if hasattr(self.memory, "memory") and "strategy_weights" in self.memory.memory:
-                strategy_weights = self.memory.memory.get("strategy_weights", {})
-            
             # Simplified review response
             return {
                 "performance_analysis": f"Reviewed performance with {win_rate:.1%} win rate ({win_count}/{total_count})",
-                "strategy_weights": strategy_weights
+                "strategy_weights": self.memory.memory.get("strategy_weights", {})
             }
             
         except Exception as e:
