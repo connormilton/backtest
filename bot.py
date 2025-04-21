@@ -644,169 +644,169 @@ class EURUSDTradingBot:
             return False
     
     def execute_decision(self, decision, price_data):
-    """Execute a trading decision"""
-    try:
-        action = decision.get("action", "WAIT")
-        
-        if action == "WAIT":
-            # Nothing to do
-            return True
+        """Execute a trading decision"""
+        try:
+            action = decision.get("action", "WAIT")
             
-        elif action == "OPEN":
-            # Handle opening a new position
-            if "trade_details" not in decision:
-                self.last_error = "Missing trade_details in decision"
-                return False
+            if action == "WAIT":
+                # Nothing to do
+                return True
                 
-            trade_details = decision["trade_details"]
-            direction = trade_details.get("direction", "BUY")
-            
-            # Ensure we have proper price levels
-            try:
-                entry_price = float(trade_details.get("entry_price", 0))
-                stop_loss = float(trade_details.get("stop_loss", 0))
+            elif action == "OPEN":
+                # Handle opening a new position
+                if "trade_details" not in decision:
+                    self.last_error = "Missing trade_details in decision"
+                    return False
+                    
+                trade_details = decision["trade_details"]
+                direction = trade_details.get("direction", "BUY")
                 
-                # Get take profit levels
-                take_profit_levels = trade_details.get("take_profit", [])
-                if isinstance(take_profit_levels, list) and len(take_profit_levels) > 0:
-                    take_profit = float(take_profit_levels[0])
-                else:
-                    take_profit = float(take_profit_levels) if take_profit_levels else 0
-            except (ValueError, TypeError):
-                self.last_error = "Invalid price values in trade details"
-                return False
-            
-            # Validate the trade
-            if entry_price <= 0 or stop_loss <= 0 or take_profit <= 0:
-                self.last_error = f"Invalid price levels: Entry={entry_price}, SL={stop_loss}, TP={take_profit}"
-                return False
-                
-            # Calculate risk percentage (default to 1% if not specified)
-            try:
-                risk_percent = float(trade_details.get("risk_percent", 1.0))
-                # Cap at 1% maximum
-                risk_percent = min(risk_percent, 1.0)
-            except (ValueError, TypeError):
-                risk_percent = 1.0
-            
-            # Check current positions to avoid opening multiple
-            positions = self.oanda_client.get_open_positions()
-            if any(p.get('instrument') == 'EUR_USD' for p in positions):
-                self.last_error = "Cannot open new position when one already exists"
-                return False
-            
-            # Execute the trade (use your actual method for opening positions)
-            if hasattr(self, 'open_position'):
-                result = self.open_position(direction, entry_price, stop_loss, take_profit, risk_percent)
-            else:
-                # Fallback if open_position doesn't exist
-                result = True
-                # Add your opening position code here
-            
-            # Record the trade in memory if successful
-            if result and hasattr(self, 'memory') and hasattr(self.memory, 'record_trade'):
+                # Ensure we have proper price levels
                 try:
-                    self.memory.record_trade(
-                        direction=direction,
-                        entry_price=entry_price,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        risk_percent=risk_percent,
-                        reasoning=trade_details.get("reasoning", "")
-                    )
-                except Exception as e:
-                    # Don't fail the whole operation if recording fails
-                    print(f"Warning: Failed to record trade: {e}")
-                
-            return result
-            
-        elif action == "UPDATE":
-            # Handle updating an existing position
-            
-            # First check if we have a position to update
-            positions = self.oanda_client.get_open_positions()
-            eur_usd_positions = [p for p in positions if p.get("instrument") == "EUR_USD"]
-            
-            if not eur_usd_positions:
-                self.last_error = "No EUR/USD positions found to update"
-                return False
-            
-            # Get adjustment details
-            position_management = decision.get("position_management", {})
-            position_adjustment = position_management.get("position_adjustment", {})
-            
-            # Get new stop loss and take profit levels
-            try:
-                new_stop_loss = None
-                if position_adjustment.get("adjust_stop_loss") is not None:
-                    new_stop_loss = float(position_adjustment.get("adjust_stop_loss"))
-                
-                new_take_profit = None
-                take_profit_adj = position_adjustment.get("adjust_take_profit")
-                if take_profit_adj is not None:
-                    if isinstance(take_profit_adj, list) and len(take_profit_adj) > 0:
-                        new_take_profit = float(take_profit_adj[0])
+                    entry_price = float(trade_details.get("entry_price", 0))
+                    stop_loss = float(trade_details.get("stop_loss", 0))
+                    
+                    # Get take profit levels
+                    take_profit_levels = trade_details.get("take_profit", [])
+                    if isinstance(take_profit_levels, list) and len(take_profit_levels) > 0:
+                        take_profit = float(take_profit_levels[0])
                     else:
-                        new_take_profit = float(take_profit_adj)
-            except (ValueError, TypeError):
-                self.last_error = "Invalid price values in position adjustment"
-                return False
-            
-            # Check if we have adjustments to make
-            if new_stop_loss is None and new_take_profit is None:
-                self.last_error = "No stop loss or take profit adjustments specified"
-                return False
-            
-            # Execute the update (use your actual method for updating positions)
-            if hasattr(self, 'update_position'):
-                result = self.update_position(
-                    position_id=eur_usd_positions[0].get("id"),
-                    new_stop_loss=new_stop_loss,
-                    new_take_profit=new_take_profit
-                )
-            else:
-                # Fallback if update_position doesn't exist
-                result = True
-                # Add your position update code here
-            
-            return result
-            
-        elif action == "CLOSE":
-            # Handle closing an existing position
-            
-            # First check if we have a position to close
-            positions = self.oanda_client.get_open_positions()
-            eur_usd_positions = [p for p in positions if p.get("instrument") == "EUR_USD"]
-            
-            if not eur_usd_positions:
-                self.last_error = "No EUR/USD positions found to close"
-                return False
-            
-            # Execute the close (use your actual method for closing positions)
-            if hasattr(self, 'close_position'):
-                result = self.close_position(position_id=eur_usd_positions[0].get("id"))
-            else:
-                # Fallback if close_position doesn't exist
-                result = True
-                # Add your position closing code here
-            
-            # Record the position closure in memory if successful
-            if result and hasattr(self, 'memory') and hasattr(self.memory, 'update_last_trade'):
+                        take_profit = float(take_profit_levels) if take_profit_levels else 0
+                except (ValueError, TypeError):
+                    self.last_error = "Invalid price values in trade details"
+                    return False
+                
+                # Validate the trade
+                if entry_price <= 0 or stop_loss <= 0 or take_profit <= 0:
+                    self.last_error = f"Invalid price levels: Entry={entry_price}, SL={stop_loss}, TP={take_profit}"
+                    return False
+                    
+                # Calculate risk percentage (default to 1% if not specified)
                 try:
-                    self.memory.update_last_trade(is_closed=True)
-                except Exception as e:
-                    # Don't fail the whole operation if recording fails
-                    print(f"Warning: Failed to update trade record: {e}")
-            
-            return result
-            
-        else:
-            self.last_error = f"Unknown action: {action}"
+                    risk_percent = float(trade_details.get("risk_percent", 1.0))
+                    # Cap at 1% maximum
+                    risk_percent = min(risk_percent, 1.0)
+                except (ValueError, TypeError):
+                    risk_percent = 1.0
+                
+                # Check current positions to avoid opening multiple
+                positions = self.oanda_client.get_open_positions()
+                if any(p.get('instrument') == 'EUR_USD' for p in positions):
+                    self.last_error = "Cannot open new position when one already exists"
+                    return False
+                
+                # Execute the trade (use your actual method for opening positions)
+                if hasattr(self, 'open_position'):
+                    result = self.open_position(direction, entry_price, stop_loss, take_profit, risk_percent)
+                else:
+                    # Fallback if open_position doesn't exist
+                    result = True
+                    # Add your opening position code here
+                
+                # Record the trade in memory if successful
+                if result and hasattr(self, 'memory') and hasattr(self.memory, 'record_trade'):
+                    try:
+                        self.memory.record_trade(
+                            direction=direction,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            risk_percent=risk_percent,
+                            reasoning=trade_details.get("reasoning", "")
+                        )
+                    except Exception as e:
+                        # Don't fail the whole operation if recording fails
+                        print(f"Warning: Failed to record trade: {e}")
+                    
+                return result
+                
+            elif action == "UPDATE":
+                # Handle updating an existing position
+                
+                # First check if we have a position to update
+                positions = self.oanda_client.get_open_positions()
+                eur_usd_positions = [p for p in positions if p.get("instrument") == "EUR_USD"]
+                
+                if not eur_usd_positions:
+                    self.last_error = "No EUR/USD positions found to update"
+                    return False
+                
+                # Get adjustment details
+                position_management = decision.get("position_management", {})
+                position_adjustment = position_management.get("position_adjustment", {})
+                
+                # Get new stop loss and take profit levels
+                try:
+                    new_stop_loss = None
+                    if position_adjustment.get("adjust_stop_loss") is not None:
+                        new_stop_loss = float(position_adjustment.get("adjust_stop_loss"))
+                    
+                    new_take_profit = None
+                    take_profit_adj = position_adjustment.get("adjust_take_profit")
+                    if take_profit_adj is not None:
+                        if isinstance(take_profit_adj, list) and len(take_profit_adj) > 0:
+                            new_take_profit = float(take_profit_adj[0])
+                        else:
+                            new_take_profit = float(take_profit_adj)
+                except (ValueError, TypeError):
+                    self.last_error = "Invalid price values in position adjustment"
+                    return False
+                
+                # Check if we have adjustments to make
+                if new_stop_loss is None and new_take_profit is None:
+                    self.last_error = "No stop loss or take profit adjustments specified"
+                    return False
+                
+                # Execute the update (use your actual method for updating positions)
+                if hasattr(self, 'update_position'):
+                    result = self.update_position(
+                        position_id=eur_usd_positions[0].get("id"),
+                        new_stop_loss=new_stop_loss,
+                        new_take_profit=new_take_profit
+                    )
+                else:
+                    # Fallback if update_position doesn't exist
+                    result = True
+                    # Add your position update code here
+                
+                return result
+                
+            elif action == "CLOSE":
+                # Handle closing an existing position
+                
+                # First check if we have a position to close
+                positions = self.oanda_client.get_open_positions()
+                eur_usd_positions = [p for p in positions if p.get("instrument") == "EUR_USD"]
+                
+                if not eur_usd_positions:
+                    self.last_error = "No EUR/USD positions found to close"
+                    return False
+                
+                # Execute the close (use your actual method for closing positions)
+                if hasattr(self, 'close_position'):
+                    result = self.close_position(position_id=eur_usd_positions[0].get("id"))
+                else:
+                    # Fallback if close_position doesn't exist
+                    result = True
+                    # Add your position closing code here
+                
+                # Record the position closure in memory if successful
+                if result and hasattr(self, 'memory') and hasattr(self.memory, 'update_last_trade'):
+                    try:
+                        self.memory.update_last_trade(is_closed=True)
+                    except Exception as e:
+                        # Don't fail the whole operation if recording fails
+                        print(f"Warning: Failed to update trade record: {e}")
+                
+                return result
+                
+            else:
+                self.last_error = f"Unknown action: {action}"
+                return False
+                
+        except Exception as e:
+            self.last_error = f"Error executing decision: {str(e)}"
             return False
-            
-    except Exception as e:
-        self.last_error = f"Error executing decision: {str(e)}"
-        return False
     
     def run_backtest(self, strategy_params, instrument="EUR_USD", days=30):
         """Run a backtest for a strategy with given parameters"""
