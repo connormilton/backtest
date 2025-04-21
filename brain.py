@@ -129,6 +129,10 @@ def generate_signals(self, data):
             
         return take_profit
     
+    def get_parameters(self):
+        """Get current parameters"""
+        return self.parameters.copy()
+    
     def set_parameters(self, **kwargs):
         """Update strategy parameters"""
         self.parameters.update(kwargs)
@@ -470,66 +474,59 @@ Your memory and self-improvement:
             strategies = self.memory.get_saved_strategies(3)
             strategy_info = "None" if not strategies else ", ".join([f"{s.get('name', 'Unknown')}" for s in strategies])
             
-            # Create prompt with all available data
-            from prompts import MARKET_ANALYSIS_PROMPT
-            prompt = MARKET_ANALYSIS_PROMPT.format(
-                balance=memory_stats["balance"],
-                currency=memory_stats["currency"],
-                safety_level=memory_stats["safety_level"],
-                daily_profit_pct=memory_stats["daily_profit_pct"],
-                win_rate=memory_stats["win_rate"],
-                win_count=memory_stats["win_count"],
-                trade_count=memory_stats["trade_count"],
-                open_positions=open_positions,
-                price_data=price_sample,
-                technical_indicators=technical_data,
-                multi_timeframe_data=multi_tf_data,
-                intermarket_data=intermarket_data,
-                economic_data=econ_data,
-                sentiment_data=sentiment_data,
-                recent_trades="\n".join(recent_trades_formatted),
-                strategy_info=strategy_info,
-                strategy_weights=str(self.memory.memory.get("strategy_weights", {}))
-            )
+            # Create a simplified prompt to test API functionality
+            simple_prompt = f"""
+            Please analyze the following trading data and provide a decision on EUR/USD:
+
+            Current price: {price_data['close'].iloc[-1]}
+            Account balance: {memory_stats["balance"]}
+            Current positions: {open_positions}
+
+            Respond with a JSON object containing:
+            {{
+              "action": "OPEN" or "WAIT",
+              "trade_details": {{
+                "direction": "BUY" or "SELL",
+                "entry_price": price,
+                "stop_loss": sl_price,
+                "take_profit": [tp_level1, tp_level2],
+                "risk_percent": 1-5 based on conviction,
+                "reasoning": "brief explanation"
+              }}
+            }}
+            """
             
-            # Call OpenAI API
-            response = openai.ChatCompletion.create(
-                model="gpt-4-turbo-preview",  # Use appropriate model
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=2000
-            )
-            
-            # Parse response
-            decision_text = response.choices[0].message.content
-            
-            # Try to parse as JSON
+            # Call OpenAI API using a simpler approach
             try:
-                import json
-                # Find JSON part by looking for the first '{' and last '}'
-                json_start = decision_text.find('{')
-                json_end = decision_text.rfind('}') + 1
+                # Import the OpenAI client directly
+                from openai import OpenAI
                 
-                if json_start != -1 and json_end != -1:
-                    # Extract the JSON string
-                    json_str = decision_text[json_start:json_end]
-                    # Strip any leading/trailing whitespace
-                    json_str = json_str.strip()
-                    
-                    # Try to parse the JSON
-                    try:
-                        decision_json = json.loads(json_str)
-                    except json.JSONDecodeError as e:
-                        # If that fails, try to fix common JSON formatting issues
-                        logger.warning(f"Initial JSON parsing failed: {e}")
-                        # Sometimes LLMs add trailing commas or miss quotes - try to clean it up
-                        # This is a very basic cleanup - you might need more sophisticated handling
-                        json_str = json_str.replace(",\n}", "\n}")  # Fix trailing commas
-                        json_str = json_str.replace(",\n  }", "\n  }")
-                        decision_json = json.loads(json_str)
+                # Initialize client
+                client = OpenAI(api_key=openai.api_key)
+                
+                # Log that we're about to make the API call
+                logger.info("Calling OpenAI API with simplified prompt...")
+                
+                # Make the API call
+                response = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are a trading assistant that responds only in JSON format."},
+                        {"role": "user", "content": simple_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+                
+                # Extract the response text
+                decision_text = response.choices[0].message.content
+                
+                # Log the first part of the response for diagnostic purposes
+                logger.info(f"Raw LLM response (first 200 chars): {decision_text[:200]}...")
+                
+                # Parse the JSON response
+                try:
+                    decision_json = json.loads(decision_text)
                     
                     # Extract the action field or set default
                     action = decision_json.get("action", "WAIT")
@@ -543,35 +540,74 @@ Your memory and self-improvement:
                     decision_json["raw_llm_response"] = decision_text
                     
                     return decision_json
-                else:
-                    logger.warning("No JSON found in LLM response")
-                    return {"action": "WAIT", "reason": "Invalid response format", "raw_llm_response": decision_text}
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON parsing failed: {e}")
+                    
+                    # Fallback with more robust extraction
+                    json_str = self._extract_json_from_text(decision_text)
+                    if json_str:
+                        return json.loads(json_str)
+                    else:
+                        # If all parsing fails, extract action from text
+                        if "BUY" in decision_text:
+                            return {
+                                "action": "OPEN",
+                                "trade_details": {
+                                    "direction": "BUY",
+                                    "reasoning": "Extracted from non-JSON response"
+                                }
+                            }
+                        elif "SELL" in decision_text:
+                            return {
+                                "action": "OPEN", 
+                                "trade_details": {
+                                    "direction": "SELL",
+                                    "reasoning": "Extracted from non-JSON response"
+                                }
+                            }
+                        else:
+                            return {"action": "WAIT", "reason": "Could not parse response as JSON"}
                     
             except Exception as e:
-                logger.error(f"Error parsing LLM response: {e}")
-                # If JSON parsing fails, look for key action words in the text
-                decision_text_lower = decision_text.lower()
-                
-                if "buy" in decision_text_lower and "sell" not in decision_text_lower:
-                    action = "OPEN"
-                    direction = "BUY"
-                elif "sell" in decision_text_lower and "buy" not in decision_text_lower:
-                    action = "OPEN"
-                    direction = "SELL"
-                else:
-                    action = "WAIT"
-                    direction = None
-                
-                return {
-                    "action": action, 
-                    "trade_details": {"direction": direction} if direction else {},
-                    "reason": f"Error parsing response: {str(e)}", 
-                    "raw_llm_response": decision_text
-                }
+                logger.error(f"Error calling OpenAI API: {str(e)}")
+                return {"action": "WAIT", "reason": f"OpenAI API error: {str(e)}"}
                 
         except Exception as e:
             logger.error(f"Error analyzing market: {e}")
             return {"action": "WAIT", "reason": f"Analysis error: {str(e)}"}
+    
+    def _extract_json_from_text(self, text):
+        """Extract and fix JSON from text that might contain incomplete JSON"""
+        try:
+            # Find the JSON-like part (starting with { and ending with })
+            json_pattern = re.compile(r'(\{.*\})', re.DOTALL)
+            match = json_pattern.search(text)
+            
+            if not match:
+                return None
+            
+            json_str = match.group(1)
+            
+            # Clean up common JSON formatting issues
+            json_str = re.sub(r',\s*}', '}', json_str)  # Remove trailing commas
+            json_str = re.sub(r',\s*]', ']', json_str)  # Remove trailing commas in arrays
+            
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parsing failed after cleanup: {e}")
+                
+                # Try additional cleanup for more severe formatting issues
+                # Remove any newlines and extra spaces before quotes
+                json_str = re.sub(r'\n\s*"', '"', json_str)
+                # Ensure proper property name formatting
+                json_str = re.sub(r'([{,])\s*([^"\s]+)\s*:', r'\1"\2":', json_str)
+                
+                return json.loads(json_str)
+        except Exception as e:
+            logger.error(f"Error in JSON extraction: {e}")
+            return None
     
     def validate_trade(self, trade_details, price_data, validation_period=10):
         """Validate a trade through backtesting before execution"""
@@ -778,8 +814,8 @@ def generate_signals(self, data):
     df = data.copy()
     
     # Calculate EMAs
-    df['ema_fast'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['ema_slow'] = df['close'].ewm(span=30, adjust=False).mean()
+    df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
     
     # Initialize signal column
     df['signal'] = 0
@@ -789,12 +825,12 @@ def generate_signals(self, data):
     entry_price = self.parameters.get('entry_price', 0)
     
     if direction == 'BUY':
-        # Buy when price crosses entry and EMA10 > EMA30
-        buy_condition = (df['close'] >= entry_price) & (df['ema_fast'] > df['ema_slow'])
+        # Buy when price is near entry and EMA20 > EMA50
+        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['ema_20'] > df['ema_50'])
         df.loc[buy_condition, 'signal'] = 1
     else:
-        # Sell when price crosses entry and EMA10 < EMA30
-        sell_condition = (df['close'] <= entry_price) & (df['ema_fast'] < df['ema_slow'])
+        # Sell when price is near entry and EMA20 < EMA50
+        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['ema_20'] < df['ema_50'])
         df.loc[sell_condition, 'signal'] = -1
     
     return df
@@ -823,11 +859,11 @@ def generate_signals(self, data):
     
     if direction == 'BUY':
         # Buy when price breaks above upper band
-        buy_condition = (df['close'] >= entry_price) & (df['close'] > df['upper_band'])
+        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['close'] > df['upper_band'])
         df.loc[buy_condition, 'signal'] = 1
     else:
         # Sell when price breaks below lower band
-        sell_condition = (df['close'] <= entry_price) & (df['close'] < df['lower_band'])
+        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['close'] < df['lower_band'])
         df.loc[sell_condition, 'signal'] = -1
     
     return df
@@ -856,11 +892,11 @@ def generate_signals(self, data):
     
     if direction == 'BUY':
         # Buy when RSI is below 30 (oversold) and price at entry
-        buy_condition = (df['close'] >= entry_price) & (df['rsi'] < 30)
+        buy_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['rsi'] < 30)
         df.loc[buy_condition, 'signal'] = 1
     else:
         # Sell when RSI is above 70 (overbought) and price at entry
-        sell_condition = (df['close'] <= entry_price) & (df['rsi'] > 70)
+        sell_condition = (df['close'] >= entry_price * 0.9995) & (df['close'] <= entry_price * 1.0005) & (df['rsi'] > 70)
         df.loc[sell_condition, 'signal'] = -1
     
     return df
@@ -963,7 +999,7 @@ def generate_signals(self, data):
                     try:
                         review_json = json.loads(json_str)
                     except json.JSONDecodeError:
-                        # Try to clean up common JSON formatting issues
+                        # Try to fix common JSON formatting issues
                         json_str = json_str.replace(",\n}", "\n}")  # Fix trailing commas
                         json_str = json_str.replace(",\n  }", "\n  }")
                         review_json = json.loads(json_str)

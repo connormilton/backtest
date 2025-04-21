@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Main entry point for the LLM-powered Forex Trading Bot
+Updated to use Enhanced Trading Brain with backtesting integration
 """
 
 import os
@@ -13,7 +14,8 @@ from dotenv import load_dotenv
 
 # Import bot components
 from bot import EURUSDTradingBot
-# Remove the import for backtest_analytics
+# Import the enhanced brain
+from enhanced_brain import EnhancedTradingBrain
 from backtest_engine import Backtester
 
 # Configure logging
@@ -39,14 +41,14 @@ os.makedirs("strategies", exist_ok=True)
 def main():
     """Main function to run the trading bot"""
     try:
-        logger.info("Initializing EUR/USD Trading Bot")
+        logger.info("Initializing EUR/USD Trading Bot with Enhanced Brain")
         
         # Create trading bot
         trading_bot = EURUSDTradingBot()
         
-        # Add analytics to backtester (optional)
-        # If you want to use analytics, uncomment the following line:
-        # trading_bot.backtester = enhance_backtester(Backtester)(trading_bot.backtester.data_provider)
+        # Replace the brain with the enhanced version
+        trading_bot.brain = EnhancedTradingBrain(trading_bot.memory, trading_bot.backtester)
+        logger.info("Enhanced trading brain initialized with backtesting integration")
         
         # Main trading loop
         logger.info("Starting main trading loop")
@@ -77,7 +79,34 @@ def main():
                 # Get current positions
                 positions = trading_bot.oanda_client.get_open_positions()
                 
-                # Get current price data
+                # Get current price data for multiple timeframes
+                market_data = {}
+                
+                # Get additional market data if available
+                try:
+                    # Add multiple timeframes if available
+                    market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
+                    
+                    # Add technical indicators if method exists
+                    if hasattr(trading_bot.oanda_client, 'get_technical_indicators'):
+                        tech_indicators = trading_bot.oanda_client.get_technical_indicators(price_data)
+                        market_data["technical_indicators"] = tech_indicators
+                        
+                    # Add intermarket data if method exists
+                    if hasattr(trading_bot.oanda_client, 'get_intermarket_data'):
+                        market_data["intermarket"] = trading_bot.oanda_client.get_intermarket_data()
+                        
+                    # Add economic data if method exists
+                    if hasattr(trading_bot.oanda_client, 'get_economic_calendar'):
+                        market_data["economic"] = trading_bot.oanda_client.get_economic_calendar()
+                        
+                    # Add sentiment data if method exists
+                    if hasattr(trading_bot.oanda_client, 'get_market_sentiment'):
+                        market_data["sentiment"] = trading_bot.oanda_client.get_market_sentiment()
+                except Exception as e:
+                    logger.warning(f"Error collecting additional market data: {e}")
+                
+                # Get H1 data for main analysis
                 price_data = trading_bot.oanda_client.get_eur_usd_data(count=100, granularity="H1")
                 
                 # If we have no price data, wait and try again
@@ -86,16 +115,8 @@ def main():
                     time.sleep(60)  # Wait 1 minute
                     continue
                 
-                # Get additional market data
-                market_data = {
-                    "multi_timeframe": trading_bot.oanda_client.get_multi_timeframe_data(),
-                    "technical_indicators": trading_bot.oanda_client.get_technical_indicators(price_data),
-                    "intermarket": trading_bot.oanda_client.get_intermarket_data(),
-                    "economic": trading_bot.oanda_client.get_economic_calendar(),
-                    "sentiment": trading_bot.oanda_client.get_market_sentiment()
-                }
-                
-                # Get trading decision
+                # Get trading decision from enhanced brain
+                logger.info("Requesting market analysis from enhanced brain...")
                 decision = trading_bot.brain.analyze_market(
                     price_data=price_data,
                     account_data=account_status,
@@ -105,6 +126,17 @@ def main():
                 
                 # Log decision
                 logger.info(f"Trading decision: {decision.get('action', 'UNKNOWN')}")
+                
+                # Check if backtesting was performed
+                if "backtest_validation" in decision:
+                    backtest_result = decision["backtest_validation"]
+                    logger.info(f"Backtest validation: {backtest_result.get('valid')}, {backtest_result.get('reason')}")
+                    
+                    if backtest_result.get("metrics"):
+                        metrics = backtest_result["metrics"]
+                        logger.info(f"Backtest metrics: Win Rate: {metrics.get('win_rate', 0):.1f}%, " +
+                                   f"Profit Factor: {metrics.get('profit_factor', 0):.2f}, " +
+                                   f"Sharpe: {metrics.get('sharpe_ratio', 0):.2f}")
                 
                 # Execute decision
                 if decision.get("action") != "WAIT":
