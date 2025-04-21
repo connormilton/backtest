@@ -41,12 +41,23 @@ class OandaClient:
         """Initialize OANDA client"""
         self.api_key = api_key
         self.account_id = account_id
-        self.base_url = "https://api-fxpractice.oanda.com"  # Using practice API
+        
+        # Check OANDA_PRACTICE environment variable
+        is_practice = os.getenv("OANDA_PRACTICE", "True").lower() != "false"
+        
+        # Set appropriate base URL
+        if is_practice:
+            self.base_url = "https://api-fxpractice.oanda.com"  # Practice API
+            logger.info("Using OANDA Practice API")
+        else:
+            self.base_url = "https://api-fxtrade.oanda.com"  # Live API
+            logger.info("Using OANDA Live API")
+            
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        logger.info("OANDA client initialized")
+        logger.info(f"OANDA client initialized ({'Practice' if is_practice else 'Live'} API)")
         
     def get_account_summary(self):
         """Get account summary from OANDA"""
