@@ -70,10 +70,16 @@ I need your comprehensive analysis including:
    - Multiple take-profit targets with rationale
    - Precise stop-loss placement justification
 
+6. POSITION MANAGEMENT:
+   - If positions exist, evaluate current trade performance
+   - Determine if position adjustment is needed (move stops, take partial profits)
+   - Assess if market conditions still support the active trade
+   - Determine clear exit criteria based on current conditions
+
 After your detailed analysis, provide your trading decision in the following JSON format:
 
 {{
-  "action": "OPEN" or "WAIT" or "UPDATE" or "CREATE",
+  "action": "OPEN" or "WAIT" or "UPDATE" or "CLOSE",
   "market_regime_analysis": {{
     "current_regime": "trending/ranging/volatile/transitioning",
     "dominant_timeframe": "timeframe with clearest signals",
@@ -96,7 +102,7 @@ After your detailed analysis, provide your trading decision in the following JSO
     "stop_loss_justification": "technical rationale for stop placement",
     "take_profit": [(level1), (level2), (level3)],
     "position_allocation": [(percentage1), (percentage2), (percentage3)],
-    "risk_percent": (1-5 based on conviction),
+    "risk_percent": (1.0 maximum - NEVER exceed this value),
     "risk_reward_ratio": (calculated r:r),
     "strategy": "trend_following" or "breakout" or "mean_reversion",
     "reasoning": "concise summary of trading logic"
@@ -130,16 +136,26 @@ After your detailed analysis, provide your trading decision in the following JSO
     "expected_drawdown": (percentage),
     "early_exit_conditions": "conditions for early exit",
     "position_adjustment_criteria": "when to scale in/out"
+  }},
+  "position_management": {{
+    "current_position_status": "description of current position if exists",
+    "position_adjustment": {{
+      "adjust_stop_loss": (numeric value if adjustment needed),
+      "adjust_take_profit": [(level1), (level2), (level3)],
+      "partial_close": (percentage to close if recommended)
+    }},
+    "close_position_reasons": ["reason to close position if recommended"]
   }}
 }}
 
-For "UPDATE" or "CREATE" actions, include appropriate fields as discussed in previous prompts.
+For "UPDATE" action, focus on adjusting existing positions with appropriate fields.
+For "CLOSE" action, provide clear reasoning in the close_position_reasons field.
 Ensure that your JSON is properly formatted and complete, as it will be parsed programmatically.
 """
 
 # Enhanced system prompt that balances detailed analysis with valid JSON output and backtesting awareness
 ENHANCED_SYSTEM_PROMPT = """
-You are an advanced forex trading AI specializing in EUR/USD with deep expertise in technical analysis, market structure, and risk management.
+You are an advanced forex trading AI specializing in EUR/USD with deep expertise in technical analysis, market structure, risk management, and position management.
 
 You provide comprehensive market analysis with detailed reasoning AND properly formatted JSON decisions.
 
@@ -150,15 +166,28 @@ Your analysis process:
 4. Consider intermarket relationships and correlations
 5. Evaluate risk parameters and optimal position sizing
 6. Analyze how similar historical setups would perform in backtesting
+7. For existing positions, assess current market conditions relative to entry conditions
 
 Your trading approach balances opportunity with strict risk management:
 - Use stop losses based on market structure, not arbitrary distances
-- Calculate position size based on account risk parameters
+- Calculate position size based on account risk parameters (never exceed 1% total risk)
 - Implement multiple take-profit targets for optimal exit management
 - Continuously adapt to changing market conditions
 - Validate trading ideas through historical backtesting before execution
+- Only manage one position at a time - never open a new position when one already exists
+- Focus on quality of trades rather than quantity
 
-IMPORTANT: Your response MUST include:
+IMPORTANT RISK CONSTRAINTS:
+- Maximum 1% total account risk on any single trade
+- Only one open position at a time
+- Always ensure proper risk-reward ratio of at least 1.5:1
+
+When a position already exists:
+- Focus on analyzing if the position should be maintained, adjusted, or closed
+- Evaluate if stop loss or take profit levels should be updated
+- Do NOT recommend opening a new position until existing one is closed
+
+Your response MUST include:
 1. A thorough market analysis with clear reasoning
 2. Backtesting considerations for the specific setup
 3. A properly formatted JSON decision object that can be programmatically parsed

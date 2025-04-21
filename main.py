@@ -42,9 +42,14 @@ def main():
     """Main function to run the trading bot"""
     try:
         logger.info("Initializing EUR/USD Trading Bot with Enhanced Brain")
+        logger.info("Risk profile: max 2% total account exposure, max 1% risk per trade")
         
         # Create trading bot
         trading_bot = EURUSDTradingBot()
+        
+        # Make sure the bot has the error tracking attribute
+        if not hasattr(trading_bot, 'last_error'):
+            trading_bot.last_error = None
         
         # Replace the brain with the enhanced version
         trading_bot.brain = EnhancedTradingBrain(trading_bot.memory, trading_bot.backtester)
@@ -66,18 +71,31 @@ def main():
                            f"Drawdown={account_status['daily_drawdown']:.2f}%")
                 
                 # Check if daily target or max drawdown reached
-                if account_status["target_reached"]:
+                if account_status.get("target_reached", False):
                     logger.info(f"Daily target of {account_status['daily_profit_pct']:.2f}% reached. Pausing trading.")
                     time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                     
-                if account_status["max_drawdown_reached"]:
+                if account_status.get("max_drawdown_reached", False):
                     logger.warning(f"Maximum daily drawdown of {account_status['daily_drawdown']:.2f}% reached. Pausing trading.")
                     time.sleep(600)  # Wait 10 minutes before checking again
                     continue
                 
                 # Get current positions
                 positions = trading_bot.oanda_client.get_open_positions()
+                
+                # Calculate current exposure as percentage of account balance
+                current_exposure = 0.0
+                if positions:
+                    eur_usd_positions = [p for p in positions if p.get('instrument') == 'EUR_USD']
+                    for position in eur_usd_positions:
+                        # Get position value - could be in long or short
+                        units = abs(int(position.get('long', {}).get('units', 0)) or int(position.get('short', {}).get('units', 0)))
+                        avg_price = float(position.get('long', {}).get('averagePrice', 0) or position.get('short', {}).get('averagePrice', 0))
+                        position_value = units * avg_price
+                        current_exposure += (position_value / account_status['balance']) * 100
+                
+                logger.info(f"Current exposure: {current_exposure:.2f}% of account balance")
                 
                 # Get H1 data for main analysis first
                 price_data = trading_bot.oanda_client.get_eur_usd_data(count=100, granularity="H1")
@@ -86,7 +104,8 @@ def main():
                 market_data = {}
                 try:
                     # Add multiple timeframes if available
-                    market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
+                    if hasattr(trading_bot.oanda_client, 'get_multi_timeframe_data'):
+                        market_data["multi_timeframe"] = trading_bot.oanda_client.get_multi_timeframe_data()
                     
                     # Add technical indicators if method exists and price data is available
                     if hasattr(trading_bot.oanda_client, 'get_technical_indicators') and not price_data.empty:
@@ -136,13 +155,36 @@ def main():
                                    f"Profit Factor: {metrics.get('profit_factor', 0):.2f}, " +
                                    f"Sharpe: {metrics.get('sharpe_ratio', 0):.2f}")
                 
-                # Execute decision
-                if decision.get("action") != "WAIT":
-                    result = trading_bot.execute_decision(decision, price_data)
-                    if result:
-                        logger.info(f"Successfully executed {decision.get('action')} action")
+                # Execute decision with improved error handling
+                if decision.get("action", "WAIT") != "WAIT":
+                    # Validate decision based on current position state
+                    has_positions = len([p for p in positions if p.get('instrument') == 'EUR_USD']) > 0
+                    
+                    # Logical validation for UPDATE and CLOSE actions
+                    if decision.get("action") in ["UPDATE", "CLOSE"] and not has_positions:
+                        logger.warning(f"Cannot {decision.get('action')} when no position exists. Skipping execution.")
+                        trading_bot.last_error = f"Cannot {decision.get('action')} when no position exists"
+                    # Logical validation for OPEN action
+                    elif decision.get("action") == "OPEN" and has_positions:
+                        logger.warning("Cannot OPEN when position already exists. Skipping execution.")
+                        trading_bot.last_error = "Cannot OPEN when position already exists"
                     else:
-                        logger.warning(f"Failed to execute {decision.get('action')} action")
+                        # Proceed with execution if validation passes
+                        result = False
+                        
+                        # Check if the bot has an execute_decision method
+                        if hasattr(trading_bot, 'execute_decision'):
+                            result = trading_bot.execute_decision(decision, price_data)
+                        else:
+                            logger.error("Trading bot doesn't have execute_decision method")
+                            trading_bot.last_error = "Missing execute_decision method in trading bot"
+                        
+                        if result:
+                            logger.info(f"Successfully executed {decision.get('action')} action")
+                        else:
+                            # Get more detailed error information
+                            error_reason = getattr(trading_bot, 'last_error', 'Unknown reason')
+                            logger.warning(f"Failed to execute {decision.get('action')} action: {error_reason}")
                 
                 # Review and evolve periodically (once per day)
                 if now.hour == 0 and now.minute < 5:  # Around midnight
@@ -151,7 +193,7 @@ def main():
                     logger.info(f"System review completed: {review_result.get('performance_analysis', '')[:100]}...")
                 
                 # Determine appropriate wait time based on conditions
-                if account_status["target_reached"] or account_status["max_drawdown_reached"]:
+                if account_status.get("target_reached", False) or account_status.get("max_drawdown_reached", False):
                     # Longer wait time when targets/limits reached
                     wait_time = 600  # 10 minutes
                 elif now.hour < 7 or now.hour > 20:
